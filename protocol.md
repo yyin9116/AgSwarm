@@ -92,3 +92,13 @@
 - `OpenAIAgentsAdapter`：已落地（`adapter.name = openai_agents`）。
 - `PydanticAIAdapter`：已落地（`adapter.name = pydantic_ai`）。
 - `mcp-agent`：预留接口，建议先做 PoC 后再并入默认发行版。
+
+## 6) Daemon MVP（本仓当前实现）
+
+- 新增 `WorkflowNodeDaemon`（`src/workflow_node_daemon/daemon.py`）：
+  - 内存队列调度（`max_concurrency`）。
+  - 任务提交、取消、状态查询、等待完成。
+  - 超时控制（读取 `TaskEnvelope.controls.timeout_ms`）。
+  - 失败重试（`default_retries` / `submit(..., max_retries=...)`）。
+- 状态枚举：`pending -> running -> retrying -> (succeeded | failed | canceled)`。
+- 每个任务保留事件历史，支持 `get_task_events(task_id)` 读取。
