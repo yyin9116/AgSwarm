@@ -86,3 +86,9 @@
 - Runtime 不感知框架内部对象，仅处理 TaskEnvelope 与事件流。
 - Adapter 内部可自由接入 OpenAI Agents SDK / PydanticAI / mcp-agent。
 - 新增 Adapter 时，不改 Runtime 主干，只扩展注册表。
+
+## 5) 当前实现状态
+
+- `OpenAIAgentsAdapter`：已落地（`adapter.name = openai_agents`）。
+- `PydanticAIAdapter`：已落地（`adapter.name = pydantic_ai`）。
+- `mcp-agent`：预留接口，建议先做 PoC 后再并入默认发行版。
