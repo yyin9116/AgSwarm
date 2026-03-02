@@ -40,21 +40,6 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[desktop,nats,desktop-build]"
 
-      - name: Generate app icons from prototype.pen (optional)
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import subprocess
-          import sys
-
-          pen = Path("prototype/prototype.pen")
-          if pen.exists():
-              print(f"icon source found: {pen}")
-              subprocess.run([sys.executable, "scripts/generate_app_icon.py"], check=True)
-          else:
-              print("prototype/prototype.pen not found, fallback to committed assets/icons")
-          PY
-
       - name: Install create-dmg (macOS)
         if: runner.os == 'macOS'
         run: brew install create-dmg
