@@ -62,26 +62,34 @@ def _load_font(preferred_family: str, font_size: int, font_weight: str) -> Image
     return ImageFont.load_default()
 
 
-def _render_from_pen(*, pen_path: Path, size: int) -> Image.Image:
+def _render_from_pen(*, pen_path: Path, size: int, inset_ratio: float = 0.12) -> Image.Image:
     payload = json.loads(pen_path.read_text(encoding="utf-8"))
     icon_frame = _find_node_by_name(payload, "AgSwarm App Icon")
     width = float(icon_frame.get("width", 440))
     height = float(icon_frame.get("height", 440))
-    scale = size / max(width, height)
+    inset_ratio = min(0.4, max(0.0, float(inset_ratio)))
+    render_size = int(round(size * (1.0 - inset_ratio * 2)))
+    render_size = max(64, min(size, render_size))
+    offset = (size - render_size) // 2
+    scale = render_size / max(width, height)
 
     image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
 
     bg = _parse_hex_color(icon_frame.get("fill", "#050912"))
     radius = int(float(icon_frame.get("cornerRadius", 0)) * scale)
-    draw.rounded_rectangle((0, 0, size - 1, size - 1), radius=radius, fill=bg)
+    draw.rounded_rectangle(
+        (offset, offset, offset + render_size - 1, offset + render_size - 1),
+        radius=radius,
+        fill=bg,
+    )
 
     for child in icon_frame.get("children", []) or []:
         if not isinstance(child, dict):
             continue
         node_type = child.get("type")
-        x = int(float(child.get("x", 0)) * scale)
-        y = int(float(child.get("y", 0)) * scale)
+        x = offset + int(float(child.get("x", 0)) * scale)
+        y = offset + int(float(child.get("y", 0)) * scale)
 
         if node_type == "text":
             content = str(child.get("content", ""))

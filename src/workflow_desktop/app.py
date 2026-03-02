@@ -4,6 +4,8 @@ import asyncio
 import logging
 import os
 import sys
+import traceback
+from datetime import datetime
 from pathlib import Path
 
 from workflow_desktop.models import DesktopConfig
@@ -67,6 +69,36 @@ def _resolve_app_icon_path() -> Path | None:
     return None
 
 
+def _write_crash_log(message: str) -> None:
+    try:
+        crash_dir = Path.home() / ".workflow-desktop" / "crash-logs"
+        crash_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = crash_dir / f"desktop-crash-{ts}.log"
+        path.write_text(message, encoding="utf-8")
+    except Exception:
+        logger.exception("failed to write crash log")
+
+
+def _install_crash_handlers(loop: asyncio.AbstractEventLoop) -> None:
+    def _excepthook(exc_type, exc_value, exc_tb) -> None:  # type: ignore[no-untyped-def]
+        text = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        logger.error("unhandled exception:\n%s", text)
+        _write_crash_log(text)
+
+    def _loop_exception_handler(_loop: asyncio.AbstractEventLoop, context: dict) -> None:
+        exc = context.get("exception")
+        if exc is not None:
+            text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        else:
+            text = str(context)
+        logger.error("asyncio exception: %s", text)
+        _write_crash_log(text)
+
+    sys.excepthook = _excepthook
+    loop.set_exception_handler(_loop_exception_handler)
+
+
 def run_desktop_app(config: DesktopConfig) -> int:
     _prepare_windows_dll_paths()
     try:
@@ -92,6 +124,7 @@ def run_desktop_app(config: DesktopConfig) -> int:
             app.setWindowIcon(app_icon)
     loop = QEventLoop(app)
     asyncio.set_event_loop(loop)
+    _install_crash_handlers(loop)
     window = MainWindow(config)
     tray: QSystemTrayIcon | None = None
     tray_menu: QMenu | None = None

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import hashlib
@@ -86,6 +86,7 @@ CONFIG_SYNC_CONFLICT_POLICY_OPTIONS = CONFLICT_POLICY_OPTIONS
 RETRY_ATTEMPTS_PER_TASK_DEFAULT = 2
 RETRY_BACKOFF_BASE_SEC_DEFAULT = 0.8
 UPDATE_FEED_URL_DEFAULT = os.getenv("WORKFLOW_UPDATE_FEED_URL", "").strip()
+DEFAULT_DESKTOP_LOG_FILE = str(Path.home() / ".workflow-desktop" / "logs" / "desktop.app.log")
 if sys.platform == "darwin":
     UPDATE_ASSET_PATTERN_DEFAULT = "*macos-*.dmg"
 elif os.name == "nt":
@@ -180,23 +181,17 @@ class MainWindow(QMainWindow):
         self._load_settings_into_ui()
         self._load_mcp_services()
         self._apply_language()
+        self.statusBar().showMessage("Ready", 5000)
 
     def _refresh_header(self) -> None:
         configured = len(self._iter_node_candidates())
         online = sum(1 for _, snap in self._last_snapshots if snap is not None)
         lan_seen = len(self._discovered_nodes)
         runtime = "running" if self._running else "ready"
-        if self._language == "zh-CN":
-            runtime = "运行中" if self._running else "就绪"
         self.status_left_label.setText(
-            (
-                f"控制端: {self.config.client_id} | 网络在线: {online}/{configured} | 局域网发现: {lan_seen} | 运行态: {runtime}"
-                if self._language == "zh-CN"
-                else f"Controller: {self.config.client_id} | Network: {online}/{configured} online | LAN discovered: {lan_seen} | Runtime: {runtime}"
-            )
+            f"Controller: {self.config.client_id} | Network: {online}/{configured} online | LAN discovered: {lan_seen} | Runtime: {runtime}"
         )
-        prefix = "最后同步" if self._language == "zh-CN" else "Last sync"
-        self.status_right_label.setText(f"{prefix} {datetime.now().strftime('%H:%M:%S')}")
+        self.status_right_label.setText(f"Last sync {datetime.now().strftime('%H:%M:%S')}")
 
     def _tr(self, text: str) -> str:
         return translate_text(text, self._language)
@@ -805,7 +800,7 @@ class MainWindow(QMainWindow):
         self.settings_config_sync_conflict_policy_input.setCurrentText(self._config_sync_conflict_policy)
         self.settings_log_level_input = QComboBox()
         self.settings_log_level_input.addItems(["DEBUG", "INFO", "WARN", "ERROR"])
-        self.settings_log_file_input = QLineEdit(os.getenv("WORKFLOW_LOG_FILE", "tmp/test-logs/desktop.app.log"))
+        self.settings_log_file_input = QLineEdit(os.getenv("WORKFLOW_LOG_FILE", DEFAULT_DESKTOP_LOG_FILE))
         self.settings_mcp_path_input = QLineEdit(self.config.mcp_config_path)
         self.settings_notification_max_items_input = QLineEdit(str(self._notification_max_items))
         self.settings_notification_dedupe_window_input = QLineEdit(str(self._notification_dedupe_window_sec))
@@ -878,7 +873,8 @@ class MainWindow(QMainWindow):
         self._running = True
         await self._start_discovery_listener()
         await self.service.connect()
-        self._append_log("desktop connected")
+        self._append_log(f"desktop connected nats={self.config.nats_url}")
+        self._append_log(f"log file: {self.settings_log_file_input.text().strip() or DEFAULT_DESKTOP_LOG_FILE}")
         self._poll_task = asyncio.create_task(self._poll_nodes_loop(), name="desktop-poll-loop")
         if self._update_enabled and self._update_check_on_start:
             asyncio.create_task(self._check_updates(trigger="startup", show_dialog=False), name="desktop-update-check")
@@ -1096,7 +1092,15 @@ class MainWindow(QMainWindow):
 
     def _append_log(self, text: str) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
-        self.log_text.appendPlainText(f"[{ts}] {text}")
+        try:
+            self.log_text.appendPlainText(f"[{ts}] {text}")
+        except RuntimeError:
+            logger.debug("log_text is no longer available", exc_info=True)
+        logger.info("desktop-ui %s", text)
+        try:
+            self.statusBar().showMessage(text, 5000)
+        except RuntimeError:
+            logger.debug("statusBar is no longer available", exc_info=True)
 
     def _add_notification(
         self,
@@ -1968,8 +1972,29 @@ class MainWindow(QMainWindow):
 
     @asyncSlot()
     async def on_refresh_nodes_clicked(self) -> None:
-        await self._refresh_nodes()
-        self._append_log("nodes refreshed")
+        try:
+            await self._refresh_nodes()
+            online = sum(1 for _, snap in self._last_snapshots if snap is not None)
+            total = len(self._iter_node_candidates())
+            discovered = len(self._discovered_nodes)
+            if total == 0:
+                self._add_notification(
+                    level="warning",
+                    title="No Nodes Configured",
+                    message="No manual or discovered nodes available. Check NATS URL and discovery settings.",
+                    category="network",
+                    context={"nats_url": self.config.nats_url},
+                )
+            self._append_log(f"nodes refreshed: online={online}/{total} lan_discovered={discovered}")
+        except Exception as exc:
+            self._append_log(f"nodes refresh failed: {exc}")
+            self._add_notification(
+                level="warning",
+                title="Nodes Refresh Failed",
+                message=str(exc),
+                category="network",
+                context={"nats_url": self.config.nats_url},
+            )
 
     @asyncSlot()
     async def on_sync_config_clicked(self) -> None:
@@ -3536,3 +3561,4 @@ class MainWindow(QMainWindow):
             return
         self._running = False
         super().closeEvent(event)
+

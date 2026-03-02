@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 
 from workflow_desktop import run_desktop_app
 from workflow_desktop.models import DesktopConfig, default_mcp_config_path, default_settings_path
@@ -15,6 +16,10 @@ def _env_flag(name: str, default: bool = False) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _default_log_file() -> str:
+    return str(Path.home() / ".workflow-desktop" / "logs" / "desktop.app.log")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -87,7 +92,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--log-file",
-        default=os.getenv("WORKFLOW_LOG_FILE", "tmp/test-logs/desktop.app.log"),
+        default=os.getenv("WORKFLOW_LOG_FILE", _default_log_file()),
     )
     return parser
 
