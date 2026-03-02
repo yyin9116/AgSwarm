@@ -179,6 +179,8 @@ class MainWindow(QMainWindow):
 
         self._refresh_header()
         self._load_settings_into_ui()
+        if self.service.nats_url != self.config.nats_url:
+            self.service = DesktopControlService(client_id=self.config.client_id, nats_url=self.config.nats_url)
         self._load_mcp_services()
         self._apply_language()
         self.statusBar().showMessage("Ready", 5000)
@@ -332,6 +334,10 @@ class MainWindow(QMainWindow):
             QTabBar::tab { background: #EAF1FB; border: 1px solid #C9D6E7; padding: 7px 12px; margin-right: 4px; border-top-left-radius: 6px; border-top-right-radius: 6px; }
             QTabBar::tab:selected { background: #FFFFFF; border-bottom-color: #FFFFFF; }
             QListWidget, QPlainTextEdit, QLineEdit, QTableWidget { background: #FFFFFF; border: 1px solid #D6DEE9; border-radius: 8px; }
+            QLineEdit, QComboBox {
+                min-height: 34px;
+                padding: 4px 8px;
+            }
             QListWidget#nodeCards::item { margin: 6px; padding: 10px; border: 1px solid #D8E1EC; border-radius: 10px; background: #FFFFFF; }
             QListWidget#nodeCards::item:selected { background: #EAF2FF; border-color: #BFD3F4; color: #1D3248; }
             QListWidget#queueList::item { margin: 4px; padding: 8px; border: 1px solid #E2DBF2; border-radius: 8px; background: #FFFFFF; }
@@ -387,6 +393,12 @@ class MainWindow(QMainWindow):
         self.agent_check_btn.clicked.connect(self.on_agent_check_clicked)
         row.addWidget(self.agent_check_btn)
         layout.addLayout(row)
+        self.connection_feedback_label = QLabel("Connection status: not connected")
+        self.connection_feedback_label.setWordWrap(True)
+        self.connection_feedback_label.setStyleSheet(
+            "QLabel { background: #EEF2F6; color: #4E6074; border: 1px solid #D3DEE9; border-radius: 8px; padding: 6px 8px; }"
+        )
+        layout.addWidget(self.connection_feedback_label)
         self.sync_config_btn = QPushButton("Sync Config")
         self.sync_config_btn.clicked.connect(self.on_sync_config_clicked)
         layout.addWidget(self.sync_config_btn)
@@ -872,8 +884,20 @@ class MainWindow(QMainWindow):
             return
         self._running = True
         await self._start_discovery_listener()
-        await self.service.connect()
-        self._append_log(f"desktop connected nats={self.config.nats_url}")
+        try:
+            await self.service.connect()
+            self._append_log(f"desktop connected nats={self.config.nats_url}")
+            self._set_connection_feedback("Connected", ok=True)
+        except Exception as exc:
+            self._append_log(f"desktop startup connect failed: {exc}")
+            self._set_connection_feedback(f"Connect failed: {exc}", ok=False)
+            self._add_notification(
+                level="warning",
+                title="Startup Connect Failed",
+                message=str(exc),
+                category="network",
+                context={"nats_url": self.config.nats_url},
+            )
         self._append_log(f"log file: {self.settings_log_file_input.text().strip() or DEFAULT_DESKTOP_LOG_FILE}")
         self._poll_task = asyncio.create_task(self._poll_nodes_loop(), name="desktop-poll-loop")
         if self._update_enabled and self._update_check_on_start:
@@ -1096,11 +1120,24 @@ class MainWindow(QMainWindow):
             self.log_text.appendPlainText(f"[{ts}] {text}")
         except RuntimeError:
             logger.debug("log_text is no longer available", exc_info=True)
-        logger.info("desktop-ui %s", text)
+        logger.info("agswarm-ui %s", text)
         try:
             self.statusBar().showMessage(text, 5000)
         except RuntimeError:
             logger.debug("statusBar is no longer available", exc_info=True)
+
+    def _set_connection_feedback(self, text: str, *, ok: bool) -> None:
+        if not hasattr(self, "connection_feedback_label"):
+            return
+        self.connection_feedback_label.setText(f"Connection status: {text}")
+        if ok:
+            self.connection_feedback_label.setStyleSheet(
+                "QLabel { background: #E8F8EE; color: #1D6E43; border: 1px solid #BDE7CB; border-radius: 8px; padding: 6px 8px; }"
+            )
+        else:
+            self.connection_feedback_label.setStyleSheet(
+                "QLabel { background: #FDEDED; color: #A23535; border: 1px solid #F3C5C5; border-radius: 8px; padding: 6px 8px; }"
+            )
 
     def _add_notification(
         self,
@@ -1964,14 +2001,34 @@ class MainWindow(QMainWindow):
 
     @asyncSlot()
     async def on_connect_clicked(self) -> None:
+        self.connect_btn.setEnabled(False)
         try:
             await self.service.connect()
-            self._append_log("connected to nats")
+            self._append_log(f"connected to nats: {self.config.nats_url}")
+            self._set_connection_feedback("Connected", ok=True)
+            self._add_notification(
+                level="info",
+                title="Connected",
+                message=f"Connected to {self.config.nats_url}",
+                category="network",
+                context={"nats_url": self.config.nats_url},
+            )
         except Exception as exc:
             self._append_log(f"connect failed: {exc}")
+            self._set_connection_feedback(f"Connect failed: {exc}", ok=False)
+            self._add_notification(
+                level="warning",
+                title="Connect Failed",
+                message=str(exc),
+                category="network",
+                context={"nats_url": self.config.nats_url},
+            )
+        finally:
+            self.connect_btn.setEnabled(True)
 
     @asyncSlot()
     async def on_refresh_nodes_clicked(self) -> None:
+        self.refresh_btn.setEnabled(False)
         try:
             await self._refresh_nodes()
             online = sum(1 for _, snap in self._last_snapshots if snap is not None)
@@ -1985,9 +2042,21 @@ class MainWindow(QMainWindow):
                     category="network",
                     context={"nats_url": self.config.nats_url},
                 )
+                self._set_connection_feedback("No nodes configured/discovered", ok=False)
+            elif online == 0:
+                self._set_connection_feedback(
+                    f"Connected but no online nodes (0/{total}, discovered={discovered})",
+                    ok=False,
+                )
+            else:
+                self._set_connection_feedback(
+                    f"Refresh ok: online={online}/{total}, discovered={discovered}",
+                    ok=True,
+                )
             self._append_log(f"nodes refreshed: online={online}/{total} lan_discovered={discovered}")
         except Exception as exc:
             self._append_log(f"nodes refresh failed: {exc}")
+            self._set_connection_feedback(f"Refresh failed: {exc}", ok=False)
             self._add_notification(
                 level="warning",
                 title="Nodes Refresh Failed",
@@ -1995,6 +2064,8 @@ class MainWindow(QMainWindow):
                 category="network",
                 context={"nats_url": self.config.nats_url},
             )
+        finally:
+            self.refresh_btn.setEnabled(True)
 
     @asyncSlot()
     async def on_sync_config_clicked(self) -> None:

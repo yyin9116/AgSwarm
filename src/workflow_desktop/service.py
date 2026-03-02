@@ -14,10 +14,15 @@ logger = logging.getLogger(__name__)
 
 class DesktopControlService:
     def __init__(self, *, client_id: str, nats_url: str) -> None:
+        self._nats_url = nats_url
         self._transport = NatsTransportProvider(server_url=nats_url)
         self._client = WorkflowControlClient(client_id=client_id, transport=self._transport)
         self._connected = False
         self._lock = asyncio.Lock()
+
+    @property
+    def nats_url(self) -> str:
+        return self._nats_url
 
     async def connect(self) -> None:
         async with self._lock:

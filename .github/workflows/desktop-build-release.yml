@@ -83,6 +83,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout (for release notes)
+        uses: actions/checkout@v4
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
@@ -91,7 +94,33 @@ jobs:
       - name: Display assets
         run: ls -R release-assets
 
-      - name: Publish GitHub Release
+      - name: Prepare release notes body
+        id: notes
+        shell: bash
+        run: |
+          NOTES_FILE="docs/releases/${GITHUB_REF_NAME}.md"
+          if [[ -f "${NOTES_FILE}" ]]; then
+            echo "use_custom=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "body<<'EOF'"
+              cat "${NOTES_FILE}"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "use_custom=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish GitHub Release (custom notes)
+        if: steps.notes.outputs.use_custom == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-assets/**/*.zip
+            release-assets/**/*.dmg
+          body: ${{ steps.notes.outputs.body }}
+
+      - name: Publish GitHub Release (auto notes)
+        if: steps.notes.outputs.use_custom != 'true'
         uses: softprops/action-gh-release@v2
         with:
           files: |

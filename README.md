@@ -70,6 +70,11 @@ git push origin v0.2.0
 
 2. 或在 GitHub Actions 手动触发 `agswarm-desktop-release`。
 
+发布说明（Release 页面正文）：
+
+1. 若存在 `docs/releases/<tag>.md`（例如 `docs/releases/v0.2.6.md`），工作流会优先使用该文件作为 Release 说明。
+2. 若不存在对应文件，则回退到 GitHub 自动生成说明。
+
 产物说明：
 
 1. macOS：默认仅发布 `AgSwarm-macos-arm64.dmg`（Apple Silicon, M1/M2/M3）
