@@ -10,7 +10,7 @@ from workflow_logging import setup_logging
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="workflow-desktop", description="Workflow desktop client (MVP)")
+    parser = argparse.ArgumentParser(prog="AgSwarm", description="AgSwarm desktop client")
     parser.add_argument("--nats-url", default=os.getenv("WORKFLOW_NATS_URL", "nats://127.0.0.1:4222"))
     parser.add_argument("--client-id", default=os.getenv("WORKFLOW_DESKTOP_CLIENT_ID", "desktop-client"))
     parser.add_argument(
@@ -61,7 +61,7 @@ def main() -> int:
     try:
         return run_desktop_app(config)
     except Exception as exc:
-        print(f"workflow-desktop failed: {exc}", file=sys.stderr)
+        print(f"AgSwarm failed: {exc}", file=sys.stderr)
         return 1
 
 

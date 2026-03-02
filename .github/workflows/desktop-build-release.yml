@@ -1,4 +1,4 @@
-name: desktop-build-release
+name: agswarm-desktop-release
 
 on:
   workflow_dispatch:
@@ -11,11 +11,14 @@ permissions:
 
 jobs:
   build:
+    name: Build (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
         os: [windows-2022, macos-14]
     runs-on: ${{ matrix.os }}
+    env:
+      APP_NAME: AgSwarm
 
     steps:
       - name: Checkout
@@ -31,23 +34,45 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[desktop,nats,desktop-build]"
 
+      - name: Generate app icons from prototype.pen
+        run: python scripts/generate_app_icon.py
+
       - name: Install create-dmg (macOS)
         if: runner.os == 'macOS'
         run: brew install create-dmg
 
       - name: Build desktop package
-        run: python scripts/build_desktop.py --clean --name workflow-desktop
+        run: python scripts/build_desktop.py --clean --name ${{ env.APP_NAME }}
+
+      - name: Generate checksums (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $out = "dist-artifacts/SHA256SUMS.txt"
+          Remove-Item $out -ErrorAction SilentlyContinue
+          Get-ChildItem dist-artifacts -File | ForEach-Object {
+            $hash = Get-FileHash $_.FullName -Algorithm SHA256
+            "$($hash.Hash.ToLower())  $($_.Name)" | Out-File -FilePath $out -Encoding utf8 -Append
+          }
+
+      - name: Generate checksums (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cd dist-artifacts
+          shasum -a 256 * > SHA256SUMS.txt
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: workflow-desktop-${{ matrix.os }}
+          name: ${{ env.APP_NAME }}-${{ matrix.os }}
           path: |
             dist-artifacts/*.zip
             dist-artifacts/*.dmg
+            dist-artifacts/SHA256SUMS.txt
           if-no-files-found: error
 
   release:
+    name: Publish Release
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-latest

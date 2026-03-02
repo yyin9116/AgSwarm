@@ -48,3 +48,29 @@ Mac->Win 一键回归（在 Mac 侧）：
 ```bash
 bash scripts/smoke_mac_client.sh
 ```
+
+## 桌面端自动打包发布（GitHub Release）
+
+已配置工作流：`.github/workflows/desktop-build-release.yml`
+
+触发方式：
+
+1. 推送版本标签（推荐）：
+
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+2. 或在 GitHub Actions 手动触发 `agswarm-desktop-release`。
+
+产物说明：
+
+1. macOS：`AgSwarm-macos-*.dmg`（可直接下载安装）
+2. Windows：`AgSwarm-windows-x64.zip`
+3. 校验文件：`SHA256SUMS.txt`
+
+获取路径：
+
+1. GitHub 仓库 `Releases` 页面
+2. 对应 tag 的 Assets 下载 `.dmg`

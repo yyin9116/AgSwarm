@@ -2,29 +2,94 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
+from pathlib import Path
 
 from workflow_desktop.models import DesktopConfig
 
 logger = logging.getLogger(__name__)
 
 
+def _prepare_windows_dll_paths() -> None:
+    """Ensure packaged Qt/PySide6 DLLs are preferred on Windows."""
+    if os.name != "nt":
+        return
+
+    raw_base = getattr(sys, "_MEIPASS", None)
+    if raw_base:
+        base = Path(raw_base)
+        # In onedir builds, _MEIPASS is usually "<app>\\_internal".
+        candidates = [
+            base,
+            base / "PySide6",
+            base / "shiboken6",
+            base.parent,
+        ]
+    else:
+        repo_root = Path(__file__).resolve().parents[2]
+        candidates = [
+            repo_root,
+            repo_root / ".venv" / "Lib" / "site-packages" / "PySide6",
+            repo_root / ".venv" / "Lib" / "site-packages" / "shiboken6",
+        ]
+
+    existing: list[str] = []
+    seen: set[str] = set()
+    for path in candidates:
+        if not path.exists():
+            continue
+        resolved = str(path.resolve())
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        existing.append(resolved)
+        try:
+            os.add_dll_directory(resolved)
+        except (FileNotFoundError, OSError):
+            continue
+
+    if existing:
+        current_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = ";".join(existing + [current_path]) if current_path else ";".join(existing)
+
+
+def _resolve_app_icon_path() -> Path | None:
+    candidates: list[Path] = []
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    if bundle_root:
+        candidates.append(Path(bundle_root) / "assets" / "icons" / "app-icon.png")
+    repo_root = Path(__file__).resolve().parents[2]
+    candidates.append(repo_root / "assets" / "icons" / "app-icon.png")
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
 def run_desktop_app(config: DesktopConfig) -> int:
+    _prepare_windows_dll_paths()
     try:
+        from PySide6.QtGui import QIcon
         from PySide6.QtWidgets import QApplication, QMenu, QStyle, QSystemTrayIcon
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError(
-            "PySide6 is not installed. Install with: pip install -e '.[desktop]'"
+            f"PySide6 import failed: {exc}. Install with: pip install -e '.[desktop]'"
         ) from exc
     try:
         from qasync import QEventLoop
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError(
-            "qasync is not installed. Install with: pip install -e '.[desktop]'"
+            f"qasync import failed: {exc}. Install with: pip install -e '.[desktop]'"
         ) from exc
     from workflow_desktop.main_window import MainWindow
 
     app = QApplication(sys.argv)
+    icon_path = _resolve_app_icon_path()
+    if icon_path is not None:
+        app_icon = QIcon(str(icon_path))
+        if not app_icon.isNull():
+            app.setWindowIcon(app_icon)
     loop = QEventLoop(app)
     asyncio.set_event_loop(loop)
     window = MainWindow(config)
@@ -32,8 +97,10 @@ def run_desktop_app(config: DesktopConfig) -> int:
     tray_menu: QMenu | None = None
     if QSystemTrayIcon.isSystemTrayAvailable():
         tray = QSystemTrayIcon(app)
-        tray.setToolTip("Workflow Desktop")
-        tray_icon = app.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+        tray.setToolTip("AgSwarm")
+        tray_icon = app.windowIcon()
+        if tray_icon.isNull():
+            tray_icon = app.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
         tray.setIcon(tray_icon)
         window.setWindowIcon(tray_icon)
         tray_menu = QMenu()

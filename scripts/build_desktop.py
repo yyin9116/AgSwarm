@@ -8,9 +8,23 @@ import sys
 from pathlib import Path
 
 
+def _build_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.pop("CONDA_PREFIX", None)
+    env.pop("CONDA_DEFAULT_ENV", None)
+    env.pop("CONDA_PROMPT_MODIFIER", None)
+    env.pop("CONDA_EXE", None)
+    env.pop("CONDA_PYTHON_EXE", None)
+    env.pop("PYTHONHOME", None)
+    path_parts = [p for p in env.get("PATH", "").split(os.pathsep) if p]
+    filtered = [p for p in path_parts if "anaconda" not in p.lower() and "miniconda" not in p.lower()]
+    env["PATH"] = os.pathsep.join(filtered)
+    return env
+
+
 def _run(cmd: list[str]) -> None:
     print(">", " ".join(cmd))
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, env=_build_env())
 
 
 def _artifact_name(base_name: str) -> str:
@@ -21,6 +35,27 @@ def _artifact_name(base_name: str) -> str:
         arch = os.uname().machine
         return f"{base_name}-macos-{arch}"
     return f"{base_name}-linux"
+
+
+def _add_data_arg(src: Path, dest: str) -> str:
+    separator = ";" if sys.platform.startswith("win") else ":"
+    return f"{src}{separator}{dest}"
+
+
+def _detect_icon_path(root: Path) -> Path | None:
+    icon_dir = root / "assets" / "icons"
+    if sys.platform.startswith("win"):
+        candidate = icon_dir / "app-icon.ico"
+        if candidate.exists():
+            return candidate
+    elif sys.platform == "darwin":
+        candidate = icon_dir / "app-icon.icns"
+        if candidate.exists():
+            return candidate
+    candidate = icon_dir / "app-icon.png"
+    if candidate.exists():
+        return candidate
+    return None
 
 
 def _create_zip(*, root_dir: Path, base_dir: str, output_base: Path) -> Path:
@@ -81,7 +116,7 @@ def _create_dmg(*, app_path: Path, output_path: Path, volume_name: str) -> Path:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build workflow desktop app with PyInstaller")
-    parser.add_argument("--name", default="workflow-desktop")
+    parser.add_argument("--name", default="AgSwarm")
     parser.add_argument("--clean", action="store_true")
     parser.add_argument("--entry", default="src/workflow_desktop/__main__.py")
     parser.add_argument(
@@ -112,6 +147,7 @@ def main() -> int:
         if spec_file.exists():
             spec_file.unlink()
 
+    icon_png = root / "assets" / "icons" / "app-icon.png"
     cmd = [
         sys.executable,
         "-m",
@@ -144,6 +180,11 @@ def main() -> int:
         "PySide6.QtWidgets",
         args.entry,
     ]
+    if icon_png.exists():
+        cmd.extend(["--add-data", _add_data_arg(icon_png, "assets/icons")])
+    icon_path = _detect_icon_path(root)
+    if icon_path is not None:
+        cmd.extend(["--icon", str(icon_path)])
     _run(cmd)
 
     dist_dir = root / "dist"

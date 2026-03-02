@@ -119,7 +119,7 @@ class MainWindow(QMainWindow):
         self._tray_force_close = False
         self._tray_hide_hint_shown = False
 
-        self.setWindowTitle("Workflow Desktop")
+        self.setWindowTitle("AgSwarm")
         self.resize(1680, 980)
 
         root = QWidget()
@@ -992,6 +992,19 @@ class MainWindow(QMainWindow):
             return []
         return [x.strip() for x in raw.split(",") if x.strip()]
 
+    def _extract_mcp_services(self, snapshot: dict[str, Any]) -> list[str]:
+        payload = snapshot.get("mcp_services")
+        if not isinstance(payload, list):
+            return []
+        values: list[str] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            service = str(item.get("service") or item.get("adapter") or "").strip()
+            if service:
+                values.append(service)
+        return values
+
     async def _poll_nodes_loop(self) -> None:
         while self._running:
             try:
@@ -1034,7 +1047,10 @@ class MainWindow(QMainWindow):
                 state = "IDLE" if (active == 0 and queued == 0) else f"BUSY {min(99, 22 + active * 28 + queued * 12)}%"
                 status = str(snap.get("status", "unknown"))
                 adapters = snap.get("adapters")
-                if isinstance(adapters, list) and adapters:
+                mcp_services = self._extract_mcp_services(snap)
+                if mcp_services:
+                    capabilities = "mcp:" + ",".join(mcp_services[:2])
+                elif isinstance(adapters, list) and adapters:
                     capabilities = ",".join(str(x) for x in adapters[:3])
                 else:
                     capabilities = "runtime"
@@ -1652,6 +1668,7 @@ class MainWindow(QMainWindow):
         checks = report.get("checks", {}) if isinstance(report, dict) else {}
         snapshot = report.get("snapshot", {}) if isinstance(report, dict) else {}
         adapters = snapshot.get("adapters", []) if isinstance(snapshot, dict) else []
+        mcp_services = self._extract_mcp_services(snapshot) if isinstance(snapshot, dict) else []
         missing = report.get("missing_adapters", []) if isinstance(report, dict) else []
         hint_lines = [
             "Quick Node Actions",
@@ -1660,6 +1677,7 @@ class MainWindow(QMainWindow):
             f"- Agent Ready: {checks.get('agent_ready')}",
             f"- Skills Loaded: {checks.get('skills_loaded')}",
             f"- Adapters: {', '.join(str(x) for x in adapters) if isinstance(adapters, list) and adapters else 'none'}",
+            f"- MCP Services: {', '.join(mcp_services) if mcp_services else 'none'}",
             f"- Missing Required: {', '.join(str(x) for x in missing) if isinstance(missing, list) and missing else 'none'}",
         ]
         self.node_hint_label.setText("\n".join(hint_lines))
