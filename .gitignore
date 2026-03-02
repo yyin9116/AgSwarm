@@ -1,2 +1,25 @@
 __pycache__/
 *.py[cod]
+.venv/
+.nats/
+.workflow_node_data/
+*.egg-info/
+tmp/
+build/
+dist/
+dist-artifacts/
+*.spec
+.DS_Store
+
+# Local tooling/runtime downloads and worktree internals.
+tools/nats-server/
+workflow/
+
+# Local planning/spec artifacts (do not publish).
+workflow-control-spec.md
+program-blueprint.md
+agent-framework-options.md
+agent-runtime.md
+reuse-evaluation.md
+ui-prd.md
+prototype/

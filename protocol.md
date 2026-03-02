@@ -1,57 +1,44 @@
-# Runtime Protocol (v0.1)
+﻿# Runtime Protocol (v0.2)
 
-目标：基于“薄 Runtime + 可插拔 Adapter”，统一任务输入与事件输出，不把状态机和调度耦合进第三方框架。
+## Goal
 
-## 1) TaskEnvelope
+Use a thin runtime with pluggable adapters. Keep task orchestration and scheduling in `workflow_node_daemon`, and keep model/tool execution in adapter implementations.
+
+## 1. TaskEnvelope
 
 ```json
 {
   "version": "1.0",
   "task_id": "8a69ccf3-6550-4f1b-b9ac-7d40fc36297b",
   "created_at": "2026-02-28T14:00:00Z",
-  "session": {
-    "session_id": "sess-001",
-    "user_id": "u-001",
-    "trace_id": "trace-001"
+  "adapter": {
+    "name": "openai_agents",
+    "model": "gpt-4.1-mini",
+    "options": {
+      "instructions": "You are a helpful assistant"
+    }
   },
-  "input": {
-    "role": "user",
-    "content": [
-      {
-        "type": "text",
-        "text": "帮我总结今天的 standup 风险项"
-      }
-    ]
-  },
+  "input_text": "Summarize today's standup risks",
   "controls": {
     "stream": true,
     "timeout_ms": 120000,
     "max_steps": 24
   },
-  "adapter": {
-    "name": "openai_agents",
-    "model": "gpt-4.1-mini",
-    "options": {
-      "instructions": "你是一个工程团队助理。"
-    }
-  },
-  "context": {
-    "memory": {},
-    "artifacts": []
-  },
+  "context": {},
   "metadata": {}
 }
 ```
 
-字段约定：
-- `task_id`：全局唯一任务 ID（建议 UUID v4）。
-- `input.content`：允许多段内容，MVP 先支持 `type=text`。
-- `controls.stream`：决定是否流式输出事件。
-- `adapter.name`：由 Runtime 路由到具体 Adapter。
+Field notes:
 
-## 2) Adapter 事件协议
+1. `task_id`: globally unique task ID (UUID recommended).
+2. `adapter.name`: adapter routing key (`openai_agents`, `pydantic_ai`, etc.).
+3. `controls.timeout_ms`: runtime timeout budget.
+4. `context`/`metadata`: extension fields for future routing and observability.
 
-统一事件封装（所有 Adapter 必须输出）：
+## 2. Event Envelope
+
+All adapters emit normalized events via `EventSink`:
 
 ```json
 {
@@ -61,44 +48,104 @@
   "sequence": 3,
   "type": "adapter.token",
   "ts": "2026-02-28T14:00:01Z",
-  "payload": {}
+  "payload": {
+    "text": "partial output"
+  }
 }
 ```
 
-事件类型（MVP）：
-- `task.accepted`：Runtime 接受任务并完成基础校验。
-- `adapter.started`：具体 Adapter 开始执行。
-- `adapter.token`：增量文本（流式）。
-- `adapter.tool_call.started`：发起工具调用。
-- `adapter.tool_call.delta`：工具输出增量（可选）。
-- `adapter.tool_call.completed`：工具调用结束。
-- `adapter.completed`：任务正常完成，`payload.output` 为最终输出。
-- `adapter.error`：执行失败，`payload` 包含 `code`/`message`。
+MVP event types:
 
-## 3) 传输层建议
+1. `task.accepted`
+2. `adapter.started`
+3. `adapter.token`
+4. `adapter.completed`
+5. `adapter.error`
 
-- `stdio`：本地 Agent/MCP 进程通信（低延迟、部署简单）。
-- `Streamable HTTP`：远程服务流式返回事件。
-- 事件序列化建议使用 `application/x-ndjson`（每行一个事件对象）。
+Optional extension events:
 
-## 4) 兼容性原则
+1. `adapter.tool_call.started`
+2. `adapter.tool_call.delta`
+3. `adapter.tool_call.completed`
+3. `task.progress`
 
-- Runtime 不感知框架内部对象，仅处理 TaskEnvelope 与事件流。
-- Adapter 内部可自由接入 OpenAI Agents SDK / PydanticAI / mcp-agent。
-- 新增 Adapter 时，不改 Runtime 主干，只扩展注册表。
+## 3. Daemon Task State
 
-## 5) 当前实现状态
+Daemon status machine:
 
-- `OpenAIAgentsAdapter`：已落地（`adapter.name = openai_agents`）。
-- `PydanticAIAdapter`：已落地（`adapter.name = pydantic_ai`）。
-- `mcp-agent`：预留接口，建议先做 PoC 后再并入默认发行版。
+1. `pending`
+2. `running`
+3. `retrying`
+4. `succeeded`
+5. `failed`
+6. `canceled`
 
-## 6) Daemon MVP（本仓当前实现）
+Retry rule:
 
-- 新增 `WorkflowNodeDaemon`（`src/workflow_node_daemon/daemon.py`）：
-  - 内存队列调度（`max_concurrency`）。
-  - 任务提交、取消、状态查询、等待完成。
-  - 超时控制（读取 `TaskEnvelope.controls.timeout_ms`）。
-  - 失败重试（`default_retries` / `submit(..., max_retries=...)`）。
-- 状态枚举：`pending -> running -> retrying -> (succeeded | failed | canceled)`。
-- 每个任务保留事件历史，支持 `get_task_events(task_id)` 读取。
+1. If outcome is failed and `attempts <= max_retries`, move to `retrying`.
+2. Otherwise move to `failed`.
+
+Cancel rule:
+
+1. Cancellation can happen before start, before attempt, during run, or after run.
+2. Terminal status is always `canceled` once cancel is accepted.
+
+## 4. Snapshot Contracts
+
+### 4.1 TaskSnapshot
+
+```json
+{
+  "task_id": "...",
+  "status": "succeeded",
+  "attempts": 1,
+  "max_retries": 1,
+  "created_at": "...",
+  "started_at": "...",
+  "finished_at": "...",
+  "error": null,
+  "cancel_requested": false,
+  "progress": 100,
+  "current_step": null,
+  "last_event_type": "adapter.completed",
+  "last_error_code": null
+}
+```
+
+### 4.2 NodeSnapshot
+
+```json
+{
+  "status": "idle",
+  "max_concurrency": 1,
+  "active_tasks": 0,
+  "queued_tasks": 0,
+  "total_tasks": 1
+}
+```
+
+## 5. Error Codes (MVP)
+
+1. `adapter_not_found`
+2. `missing_dependency`
+3. `adapter_run_failed`
+4. `runtime_timeout`
+5. `runtime_exception`
+6. `task_canceled`
+
+## 6. Adapter Boundary
+
+Runtime only depends on:
+
+1. `TaskEnvelope`
+2. `EventSink.emit(type, payload)`
+3. `Adapter.run(task, sink)`
+
+This keeps framework swap cost low (OpenAI Agents SDK / PydanticAI / mcp-agent).
+
+## 7. Next Protocol Work
+
+1. Add transport-level envelope for LAN delivery (`TaskEnvelope` + file manifests).
+2. Add artifact event schema (`artifact.created`, `artifact.uploaded`).
+3. Add progress step schema (`step`, `progress`, `eta_sec`, `resource_snapshot`).
+4. Define WebSocket/NDJSON stream framing for controller UI.

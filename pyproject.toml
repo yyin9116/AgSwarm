@@ -11,6 +11,16 @@ dependencies = [
 pydanticai = [
   "pydantic-ai>=1.63.0",
 ]
+nats = [
+  "nats-py>=2.0.0",
+]
+desktop = [
+  "PySide6>=6.7.0",
+  "qasync>=0.27.1",
+]
+desktop-build = [
+  "pyinstaller>=6.0.0",
+]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

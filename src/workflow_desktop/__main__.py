@@ -1,0 +1,69 @@
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+
+from workflow_desktop import run_desktop_app
+from workflow_desktop.models import DesktopConfig, default_mcp_config_path, default_settings_path
+from workflow_logging import setup_logging
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="workflow-desktop", description="Workflow desktop client (MVP)")
+    parser.add_argument("--nats-url", default=os.getenv("WORKFLOW_NATS_URL", "nats://127.0.0.1:4222"))
+    parser.add_argument("--client-id", default=os.getenv("WORKFLOW_DESKTOP_CLIENT_ID", "desktop-client"))
+    parser.add_argument(
+        "--nodes",
+        default=os.getenv("WORKFLOW_DESKTOP_NODE_CANDIDATES", "node-a,node-win,node-smoke"),
+        help="Comma separated node IDs shown in left panel.",
+    )
+    parser.add_argument(
+        "--poll-interval-sec",
+        type=float,
+        default=float(os.getenv("WORKFLOW_DESKTOP_POLL_INTERVAL_SEC", "2.0")),
+    )
+    parser.add_argument(
+        "--mcp-config-path",
+        default=os.getenv("WORKFLOW_DESKTOP_MCP_CONFIG_PATH"),
+        help="Path for local MCP service config json.",
+    )
+    parser.add_argument(
+        "--settings-path",
+        default=os.getenv("WORKFLOW_DESKTOP_SETTINGS_PATH"),
+        help="Path for desktop settings json.",
+    )
+    parser.add_argument(
+        "--log-level",
+        default=os.getenv("WORKFLOW_LOG_LEVEL", "INFO"),
+        help="Log level: DEBUG/INFO/WARN/ERROR",
+    )
+    parser.add_argument(
+        "--log-file",
+        default=os.getenv("WORKFLOW_LOG_FILE", "tmp/test-logs/desktop.app.log"),
+    )
+    return parser
+
+
+def main() -> int:
+    parser = _build_parser()
+    args = parser.parse_args()
+    setup_logging(level=args.log_level, log_file=args.log_file)
+
+    config = DesktopConfig(
+        nats_url=args.nats_url,
+        client_id=args.client_id,
+        node_candidates=[x.strip() for x in str(args.nodes).split(",") if x.strip()],
+        poll_interval_sec=max(0.5, args.poll_interval_sec),
+        mcp_config_path=args.mcp_config_path or default_mcp_config_path(),
+        settings_path=args.settings_path or default_settings_path(),
+    )
+    try:
+        return run_desktop_app(config)
+    except Exception as exc:
+        print(f"workflow-desktop failed: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

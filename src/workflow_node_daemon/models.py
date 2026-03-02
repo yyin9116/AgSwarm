@@ -59,3 +59,25 @@ class TaskSnapshot:
     finished_at: str | None
     error: str | None
     cancel_requested: bool
+    progress: int | None
+    current_step: str | None
+    last_event_type: str | None
+    last_error_code: str | None
+    last_error_message: str | None
+    user_message: str | None
+
+
+@dataclass(slots=True)
+class NodeSnapshot:
+    status: str
+    max_concurrency: int
+    active_tasks: int
+    queued_tasks: int
+    total_tasks: int
+    can_accept_tasks: bool
+    agent_ready: bool
+    adapters: list[str] = field(default_factory=list)
+    skills_loaded: bool = False
+    skills_source_path: str | None = None
+    skills_count: int = 0
+    skill_ids: list[str] = field(default_factory=list)

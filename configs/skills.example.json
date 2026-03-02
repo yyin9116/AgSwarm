@@ -1,0 +1,52 @@
+{
+  "skills": [
+    {
+      "id": "safe_default",
+      "name": "Safe Default",
+      "description": "Default guardrails for all tasks.",
+      "enabled": true,
+      "default": true,
+      "instructions": "Prefer deterministic steps, surface assumptions explicitly, and report actionable error details."
+    },
+    {
+      "id": "latex_compile",
+      "name": "LaTeX Compile Helper",
+      "description": "Tune latex_mcp defaults and diagnostics formatting.",
+      "enabled": true,
+      "default": false,
+      "auto_when_any_keywords": [
+        "latex",
+        ".tex",
+        "compile",
+        "pdflatex",
+        "xelatex"
+      ],
+      "instructions": "For LaTeX tasks, prioritize compile diagnostics and include missing package hints in final output.",
+      "adapter_overrides": {
+        "latex_mcp": {
+          "options": {
+            "tool": "compile_and_preview",
+            "tool_args": {
+              "preview_dpi": 180
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "openai_fast",
+      "name": "OpenAI Fast",
+      "description": "Use fast model preset for openai_agents adapter.",
+      "enabled": true,
+      "default": false,
+      "adapter_overrides": {
+        "openai_agents": {
+          "model": "gpt-4.1-mini",
+          "options": {
+            "temperature": 0.2
+          }
+        }
+      }
+    }
+  ]
+}

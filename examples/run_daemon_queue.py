@@ -24,6 +24,7 @@ async def main() -> None:
     runtime = Runtime(adapters=[EchoAdapter()])
     daemon = WorkflowNodeDaemon(runtime, max_concurrency=1, default_retries=1)
     await daemon.start()
+    print(json.dumps(asdict(daemon.get_node_snapshot()), ensure_ascii=False))
 
     task = TaskEnvelope(
         adapter=AdapterConfig(name="echo"),
@@ -37,6 +38,7 @@ async def main() -> None:
         print(json.dumps(event, ensure_ascii=False))
 
     await daemon.stop()
+    print(json.dumps(asdict(daemon.get_node_snapshot()), ensure_ascii=False))
 
 
 if __name__ == "__main__":
