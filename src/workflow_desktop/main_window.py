@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -30,6 +31,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QPlainTextEdit,
+    QScrollArea,
     QFrame,
     QSplitter,
     QTableWidget,
@@ -41,10 +43,18 @@ from PySide6.QtWidgets import (
 from qasync import asyncSlot
 
 from workflow_desktop.mcp_store import load_mcp_services, save_mcp_services
+from workflow_desktop.i18n import LANGUAGE_LABELS, SUPPORTED_LANGS, normalize_language, translate_text
+from workflow_desktop.config_sync import CONFLICT_POLICY_OPTIONS, decide_sync_action
 from workflow_desktop.models import DesktopConfig, McpServiceConfig
 from workflow_desktop.service import DesktopControlService
 from workflow_desktop.settings_store import load_settings, save_settings
 from workflow_desktop.updater import UpdateInfo, check_for_update, current_app_version
+from workflow_discovery import (
+    DISCOVERY_PORT_DEFAULT,
+    DiscoveredNode,
+    LanNodeListener,
+    is_loopback_nats_url,
+)
 from workflow_runtime.error_codes import ERROR_CODE_LABELS, build_error_summary, extract_error_code, extract_error_message
 
 logger = logging.getLogger(__name__)
@@ -64,12 +74,15 @@ NOTIFICATION_DEDUPE_WINDOW_SEC = 12.0
 NOTIFICATION_RECENT_PRUNE_SEC = 1800.0
 MIN_NOTIFICATION_CAPACITY = 50
 MAX_NOTIFICATION_CAPACITY = 5000
+DISCOVERY_MAX_AGE_SEC_DEFAULT = 8.0
 RETRY_BATCH_MAX_LIMIT_DEFAULT = 20
 RETRY_BATCH_INTERVAL_SEC_DEFAULT = 0.2
 RETRY_BATCH_SKIP_KINDS_DEFAULT = {"download_file", "download_dir"}
 RETRY_BATCH_SUPPORTED_KINDS = {"echo", "latex", "upload", "download_file", "download_dir"}
 RETRY_REROUTE_MODE_DEFAULT = "off"
 RETRY_REROUTE_MODE_OPTIONS = ("off", "echo_only", "echo_upload", "all_supported")
+CONFIG_SYNC_CONFLICT_POLICY_DEFAULT = "desktop_wins"
+CONFIG_SYNC_CONFLICT_POLICY_OPTIONS = CONFLICT_POLICY_OPTIONS
 RETRY_ATTEMPTS_PER_TASK_DEFAULT = 2
 RETRY_BACKOFF_BASE_SEC_DEFAULT = 0.8
 UPDATE_FEED_URL_DEFAULT = os.getenv("WORKFLOW_UPDATE_FEED_URL", "").strip()
@@ -88,6 +101,9 @@ class MainWindow(QMainWindow):
         self.service = DesktopControlService(client_id=config.client_id, nats_url=config.nats_url)
         self._running = False
         self._poll_task: asyncio.Task[None] | None = None
+        self._discovery_listener: LanNodeListener | None = None
+        self._discovered_nodes: dict[str, DiscoveredNode] = {}
+        self._discovery_auto_switch_last_attempt: str | None = None
         self._task_index = 0
         self._task_records: dict[str, dict[str, Any]] = {}
         self._task_order: list[str] = []
@@ -118,9 +134,25 @@ class MainWindow(QMainWindow):
         self._tray_enabled = False
         self._tray_force_close = False
         self._tray_hide_hint_shown = False
+        self._discovery_enabled = bool(config.discovery_enabled)
+        self._discovery_port = max(1, int(config.discovery_port or DISCOVERY_PORT_DEFAULT))
+        self._discovery_max_age_sec = max(2.0, float(config.discovery_max_age_sec or DISCOVERY_MAX_AGE_SEC_DEFAULT))
+        self._discovery_auto_switch_nats = bool(config.discovery_auto_switch_nats)
+        self._language = normalize_language(config.language)
+        self._config_sync_enabled = bool(config.config_sync_enabled)
+        self._config_sync_interval_sec = max(5.0, float(config.config_sync_interval_sec or 30.0))
+        self._config_sync_last_run_monotonic = 0.0
+        self._config_sync_last_digest = ""
+        self._config_sync_node_digest: dict[str, str] = {}
+        self._config_sync_retry_after: dict[str, float] = {}
+        policy = str(config.config_sync_conflict_policy or CONFIG_SYNC_CONFLICT_POLICY_DEFAULT).strip().lower()
+        self._config_sync_conflict_policy = (
+            policy if policy in CONFIG_SYNC_CONFLICT_POLICY_OPTIONS else CONFIG_SYNC_CONFLICT_POLICY_DEFAULT
+        )
 
         self.setWindowTitle("AgSwarm")
-        self.resize(1680, 980)
+        self.resize(1460, 900)
+        self.setMinimumSize(1180, 760)
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -147,15 +179,48 @@ class MainWindow(QMainWindow):
         self._refresh_header()
         self._load_settings_into_ui()
         self._load_mcp_services()
+        self._apply_language()
 
     def _refresh_header(self) -> None:
         configured = len(self._iter_node_candidates())
-        discovered = sum(1 for _, snap in self._last_snapshots if snap is not None)
+        online = sum(1 for _, snap in self._last_snapshots if snap is not None)
+        lan_seen = len(self._discovered_nodes)
         runtime = "running" if self._running else "ready"
+        if self._language == "zh-CN":
+            runtime = "运行中" if self._running else "就绪"
         self.status_left_label.setText(
-            f"Controller: {self.config.client_id} | Network: {discovered}/{configured} nodes discovered | Runtime: {runtime}"
+            (
+                f"控制端: {self.config.client_id} | 网络在线: {online}/{configured} | 局域网发现: {lan_seen} | 运行态: {runtime}"
+                if self._language == "zh-CN"
+                else f"Controller: {self.config.client_id} | Network: {online}/{configured} online | LAN discovered: {lan_seen} | Runtime: {runtime}"
+            )
         )
-        self.status_right_label.setText(datetime.now().strftime("Last sync %H:%M:%S"))
+        prefix = "最后同步" if self._language == "zh-CN" else "Last sync"
+        self.status_right_label.setText(f"{prefix} {datetime.now().strftime('%H:%M:%S')}")
+
+    def _tr(self, text: str) -> str:
+        return translate_text(text, self._language)
+
+    def _apply_language(self) -> None:
+        self.setWindowTitle("AgSwarm")
+        self.title_label.setText(self._tr("Workflow Controller Prototype (Desktop)"))
+        self.subtitle_label.setText(self._tr("LAN task dispatch, MCP execution, artifact return and live telemetry"))
+        for i in range(self.tabs.count()):
+            current = self.tabs.tabText(i)
+            self.tabs.setTabText(i, self._tr(current))
+        for group in self.findChildren(QGroupBox):
+            title = group.title().strip()
+            if title:
+                group.setTitle(self._tr(title))
+        for label in self.findChildren(QLabel):
+            text = label.text().strip()
+            if text:
+                label.setText(self._tr(text))
+        for button in self.findChildren(QPushButton):
+            text = button.text().strip()
+            if text:
+                button.setText(self._tr(text))
+        self._refresh_header()
 
     def _build_top_status_bar(self) -> QWidget:
         bar = QWidget()
@@ -172,11 +237,20 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(page)
         split = QSplitter(Qt.Horizontal)
         layout.addWidget(split, 1)
-        split.addWidget(self._build_left_panel())
-        split.addWidget(self._build_center_panel())
-        split.addWidget(self._build_queue_artifacts_column())
+        split.addWidget(self._wrap_scroll_container(self._build_left_panel()))
+        split.addWidget(self._wrap_scroll_container(self._build_center_panel()))
+        split.addWidget(self._wrap_scroll_container(self._build_queue_artifacts_column()))
         split.setSizes([380, 940, 620])
         return page
+
+    def _wrap_scroll_container(self, content: QWidget) -> QWidget:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setWidget(content)
+        return scroll
 
     def _build_queue_artifacts_column(self) -> QWidget:
         box = QGroupBox("Task Queue and Artifacts")
@@ -302,7 +376,7 @@ class MainWindow(QMainWindow):
         self.node_search_input.textChanged.connect(self.on_node_search_changed)
         layout.addWidget(self.node_search_input)
         self.node_input = QLineEdit(",".join(self.config.node_candidates))
-        self.node_input.setPlaceholderText("known node ids, comma separated")
+        self.node_input.setPlaceholderText("manual node ids (optional), comma separated")
         layout.addWidget(self.node_input)
         self.required_adapters_input = QLineEdit("echo,latex_mcp")
         self.required_adapters_input.setPlaceholderText("required adapters, comma separated")
@@ -318,6 +392,9 @@ class MainWindow(QMainWindow):
         self.agent_check_btn.clicked.connect(self.on_agent_check_clicked)
         row.addWidget(self.agent_check_btn)
         layout.addLayout(row)
+        self.sync_config_btn = QPushButton("Sync Config")
+        self.sync_config_btn.clicked.connect(self.on_sync_config_clicked)
+        layout.addWidget(self.sync_config_btn)
         self.nodes_list = QListWidget()
         self.nodes_list.setObjectName("nodeCards")
         self.nodes_list.itemClicked.connect(self.on_node_item_clicked)
@@ -707,6 +784,25 @@ class MainWindow(QMainWindow):
         self.settings_nats_url_input = QLineEdit(self.config.nats_url)
         self.settings_nodes_input = QLineEdit(",".join(self.config.node_candidates))
         self.settings_poll_input = QLineEdit(str(self.config.poll_interval_sec))
+        self.settings_discovery_enabled_input = QComboBox()
+        self.settings_discovery_enabled_input.addItems(["true", "false"])
+        self.settings_discovery_enabled_input.setCurrentText("true" if self._discovery_enabled else "false")
+        self.settings_discovery_port_input = QLineEdit(str(self._discovery_port))
+        self.settings_discovery_max_age_input = QLineEdit(str(self._discovery_max_age_sec))
+        self.settings_discovery_auto_switch_input = QComboBox()
+        self.settings_discovery_auto_switch_input.addItems(["true", "false"])
+        self.settings_discovery_auto_switch_input.setCurrentText("true" if self._discovery_auto_switch_nats else "false")
+        self.settings_language_input = QComboBox()
+        for code in SUPPORTED_LANGS:
+            self.settings_language_input.addItem(LANGUAGE_LABELS.get(code, code), code)
+        self.settings_language_input.setCurrentIndex(max(0, self.settings_language_input.findData(self._language)))
+        self.settings_config_sync_enabled_input = QComboBox()
+        self.settings_config_sync_enabled_input.addItems(["true", "false"])
+        self.settings_config_sync_enabled_input.setCurrentText("true" if self._config_sync_enabled else "false")
+        self.settings_config_sync_interval_input = QLineEdit(str(self._config_sync_interval_sec))
+        self.settings_config_sync_conflict_policy_input = QComboBox()
+        self.settings_config_sync_conflict_policy_input.addItems(list(CONFIG_SYNC_CONFLICT_POLICY_OPTIONS))
+        self.settings_config_sync_conflict_policy_input.setCurrentText(self._config_sync_conflict_policy)
         self.settings_log_level_input = QComboBox()
         self.settings_log_level_input.addItems(["DEBUG", "INFO", "WARN", "ERROR"])
         self.settings_log_file_input = QLineEdit(os.getenv("WORKFLOW_LOG_FILE", "tmp/test-logs/desktop.app.log"))
@@ -734,6 +830,14 @@ class MainWindow(QMainWindow):
         form.addRow("NATS URL", self.settings_nats_url_input)
         form.addRow("Node Candidates", self.settings_nodes_input)
         form.addRow("Poll Interval", self.settings_poll_input)
+        form.addRow("LAN Discovery Enabled", self.settings_discovery_enabled_input)
+        form.addRow("LAN Discovery Port", self.settings_discovery_port_input)
+        form.addRow("LAN Discovery Max Age (sec)", self.settings_discovery_max_age_input)
+        form.addRow("LAN Auto Switch NATS", self.settings_discovery_auto_switch_input)
+        form.addRow("Language", self.settings_language_input)
+        form.addRow("Config Sync Enabled", self.settings_config_sync_enabled_input)
+        form.addRow("Config Sync Interval (sec)", self.settings_config_sync_interval_input)
+        form.addRow("Config Sync Conflict Policy", self.settings_config_sync_conflict_policy_input)
         form.addRow("Log Level", self.settings_log_level_input)
         form.addRow("Log File", self.settings_log_file_input)
         form.addRow("MCP Config Path", self.settings_mcp_path_input)
@@ -772,6 +876,7 @@ class MainWindow(QMainWindow):
         if self._running:
             return
         self._running = True
+        await self._start_discovery_listener()
         await self.service.connect()
         self._append_log("desktop connected")
         self._poll_task = asyncio.create_task(self._poll_nodes_loop(), name="desktop-poll-loop")
@@ -784,7 +889,210 @@ class MainWindow(QMainWindow):
             self._poll_task.cancel()
             await asyncio.gather(self._poll_task, return_exceptions=True)
             self._poll_task = None
+        await self._stop_discovery_listener()
         await self.service.close()
+
+    async def _start_discovery_listener(self) -> None:
+        if not self._discovery_enabled:
+            self._append_log("lan discovery disabled")
+            return
+        if self._discovery_listener is not None:
+            return
+        listener = LanNodeListener(port=self._discovery_port)
+        try:
+            await listener.start()
+        except Exception as exc:
+            self._append_log(f"lan discovery start failed: {exc}")
+            self._add_notification(
+                level="warning",
+                title="LAN Discovery Start Failed",
+                message=str(exc),
+                category="discovery",
+                context={"port": self._discovery_port},
+            )
+            return
+        self._discovery_listener = listener
+        self._append_log(f"lan discovery listening on udp/{self._discovery_port}")
+
+    async def _stop_discovery_listener(self) -> None:
+        listener = self._discovery_listener
+        if listener is None:
+            return
+        self._discovery_listener = None
+        try:
+            await listener.stop()
+        except Exception:
+            logger.debug("stop discovery listener failed", exc_info=True)
+
+    async def _refresh_discovered_nodes(self) -> None:
+        listener = self._discovery_listener
+        if listener is None:
+            self._discovered_nodes = {}
+            return
+        self._discovered_nodes = listener.snapshot(max_age_sec=self._discovery_max_age_sec)
+        await self._maybe_auto_switch_nats()
+
+    async def _maybe_auto_switch_nats(self) -> None:
+        if not self._discovery_enabled or not self._discovery_auto_switch_nats:
+            return
+        current = self.config.nats_url.strip()
+        if not is_loopback_nats_url(current):
+            return
+        candidates = [
+            item.nats_url
+            for _, item in sorted(self._discovered_nodes.items(), key=lambda row: row[0])
+            if item.nats_url and (not is_loopback_nats_url(item.nats_url))
+        ]
+        if not candidates:
+            return
+        candidate = candidates[0]
+        if candidate == current:
+            return
+        if candidate == self._discovery_auto_switch_last_attempt:
+            return
+        self._discovery_auto_switch_last_attempt = candidate
+        old_url = self.config.nats_url
+        self._append_log(f"lan discovery detected nats {candidate}, switching from {old_url}")
+        try:
+            await self.service.close()
+        except Exception:
+            logger.debug("close service before switch failed", exc_info=True)
+        self.service = DesktopControlService(client_id=self.config.client_id, nats_url=candidate)
+        try:
+            await self.service.connect()
+        except Exception as exc:
+            self._append_log(f"auto switch nats failed: {exc}")
+            self._add_notification(
+                level="warning",
+                title="Auto Switch NATS Failed",
+                message=str(exc),
+                category="discovery",
+                context={"from_nats_url": old_url, "to_nats_url": candidate},
+            )
+            self.service = DesktopControlService(client_id=self.config.client_id, nats_url=old_url)
+            try:
+                await self.service.connect()
+            except Exception as restore_exc:
+                self._append_log(f"restore nats failed: {restore_exc}")
+            return
+        self.config.nats_url = candidate
+        self.settings_nats_url_input.setText(candidate)
+        self._add_notification(
+            level="info",
+            title="Auto Switched NATS",
+            message=f"{old_url} -> {candidate}",
+            category="discovery",
+            context={"from_nats_url": old_url, "to_nats_url": candidate},
+        )
+
+    def _build_config_sync_payload(self) -> tuple[dict[str, Any], str]:
+        payload = {
+            "schema": "agswarm.desktop.config-sync.v1",
+            "desktop": {
+                "client_id": self.config.client_id,
+                "language": self._language,
+                "app_version": self._current_version,
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            },
+            "runtime": {
+                "nats_url": self.config.nats_url,
+                "required_adapters": self._required_adapters(),
+            },
+            "mcp_services": [item.to_dict() for item in self._mcp_services],
+        }
+        normalized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        return payload, digest
+
+    async def _sync_node_config_once(
+        self,
+        *,
+        node_id: str,
+        payload: dict[str, Any],
+        digest: str,
+        now: float,
+        force: bool = False,
+    ) -> bool:
+        retry_after = self._config_sync_retry_after.get(node_id, 0.0)
+        if (not force) and now < retry_after:
+            return False
+        try:
+            result = await self.service.sync_node_config(node_id=node_id, config_payload=payload, timeout_sec=3.0)
+        except Exception as exc:
+            self._config_sync_retry_after[node_id] = now + 60.0
+            self._append_log(f"config sync failed node={node_id}: {exc}")
+            self._add_notification(
+                level="warning",
+                title=f"Config Sync Failed | {node_id}",
+                message=str(exc),
+                category="config-sync",
+                context={"node_id": node_id},
+            )
+            return False
+        if bool(result.get("ok")):
+            self._config_sync_node_digest[node_id] = digest
+            self._config_sync_retry_after.pop(node_id, None)
+            self._append_log(f"config sync ok node={node_id} revision={result.get('config_sync_revision')}")
+            self._add_notification(
+                level="info",
+                title=f"Config Synced | {node_id}",
+                message=f"revision={result.get('config_sync_revision')}",
+                category="config-sync",
+                context=result if isinstance(result, dict) else {"node_id": node_id},
+            )
+            return True
+        self._config_sync_retry_after[node_id] = now + 60.0
+        self._append_log(f"config sync rejected node={node_id}: {result}")
+        return False
+
+    async def _maybe_sync_config_to_nodes(self, snapshots: list[tuple[str, dict | None]]) -> None:
+        if not self._config_sync_enabled:
+            return
+        now = monotonic()
+        if (now - self._config_sync_last_run_monotonic) < self._config_sync_interval_sec:
+            return
+        self._config_sync_last_run_monotonic = now
+        payload, digest = self._build_config_sync_payload()
+        if digest != self._config_sync_last_digest:
+            self._config_sync_last_digest = digest
+            self._config_sync_node_digest.clear()
+            self._config_sync_retry_after.clear()
+
+        for node_id, snap in snapshots:
+            if snap is None:
+                continue
+            if self._config_sync_node_digest.get(node_id) == digest:
+                continue
+            retry_after = self._config_sync_retry_after.get(node_id, 0.0)
+            if now < retry_after:
+                continue
+            remote_digest = str(snap.get("config_sync_digest", "")).strip() if isinstance(snap, dict) else ""
+            action = decide_sync_action(
+                policy=self._config_sync_conflict_policy,
+                local_digest=digest,
+                remote_digest=remote_digest,
+                force=False,
+            )
+            if action == "skip_same":
+                self._config_sync_node_digest[node_id] = digest
+                continue
+            if action == "skip_node_wins":
+                self._config_sync_node_digest[node_id] = remote_digest
+                self._config_sync_retry_after[node_id] = now + self._config_sync_interval_sec
+                self._append_log(f"config sync skipped(node_wins) node={node_id}")
+                continue
+            if action == "skip_manual":
+                self._config_sync_retry_after[node_id] = now + self._config_sync_interval_sec
+                self._append_log(f"config sync conflict(manual) node={node_id}")
+                self._add_notification(
+                    level="warning",
+                    title=f"Config Conflict | {node_id}",
+                    message="manual sync required (click Sync Config)",
+                    category="config-sync",
+                    context={"node_id": node_id, "remote_digest": remote_digest, "local_digest": digest},
+                )
+                continue
+            await self._sync_node_config_once(node_id=node_id, payload=payload, digest=digest, now=now, force=False)
 
     def _append_log(self, text: str) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
@@ -986,11 +1294,30 @@ class MainWindow(QMainWindow):
                 return item
         return None
 
-    def _iter_node_candidates(self) -> list[str]:
+    def _iter_manual_node_candidates(self) -> list[str]:
         raw = self.node_input.text().strip()
         if not raw:
             return []
-        return [x.strip() for x in raw.split(",") if x.strip()]
+        items: list[str] = []
+        seen: set[str] = set()
+        for item in raw.split(","):
+            text = item.strip()
+            if not text or text in seen:
+                continue
+            items.append(text)
+            seen.add(text)
+        return items
+
+    def _iter_node_candidates(self) -> list[str]:
+        manual = self._iter_manual_node_candidates()
+        merged = list(manual)
+        seen = set(manual)
+        for node_id in sorted(self._discovered_nodes):
+            if node_id in seen:
+                continue
+            merged.append(node_id)
+            seen.add(node_id)
+        return merged
 
     def _extract_mcp_services(self, snapshot: dict[str, Any]) -> list[str]:
         payload = snapshot.get("mcp_services")
@@ -1015,6 +1342,7 @@ class MainWindow(QMainWindow):
             await asyncio.sleep(max(0.5, self.config.poll_interval_sec))
 
     async def _refresh_nodes(self) -> None:
+        await self._refresh_discovered_nodes()
         node_ids = self._iter_node_candidates()
         if not node_ids:
             self._last_snapshots = []
@@ -1030,16 +1358,27 @@ class MainWindow(QMainWindow):
             except Exception:
                 snapshots.append((node_id, None))
         self._last_snapshots = snapshots
+        await self._maybe_sync_config_to_nodes(snapshots)
         self.nodes_list.clear()
         active_count = 0
         for node_id, snap in snapshots:
+            discovered = self._discovered_nodes.get(node_id)
             if snap is None:
-                text = (
-                    f"{node_id}\n"
-                    f"OFFLINE\n"
-                    f"Capabilities: unknown\n"
-                    f"CPU: n/a   Memory: n/a"
-                )
+                if discovered is None:
+                    text = (
+                        f"{node_id}\n"
+                        f"OFFLINE\n"
+                        f"Capabilities: unknown\n"
+                        f"CPU: n/a   Memory: n/a"
+                    )
+                else:
+                    discovered_state = discovered.status.upper() if discovered.status else "DISCOVERED"
+                    text = (
+                        f"{node_id}\n"
+                        f"{discovered_state} (LAN announce)\n"
+                        f"Capabilities: announced by host\n"
+                        f"Host: {discovered.hostname or discovered.source_ip}  NATS: {discovered.nats_url}"
+                    )
             else:
                 active_count += 1
                 active = int(snap.get("active_tasks", 0))
@@ -1631,6 +1970,29 @@ class MainWindow(QMainWindow):
     async def on_refresh_nodes_clicked(self) -> None:
         await self._refresh_nodes()
         self._append_log("nodes refreshed")
+
+    @asyncSlot()
+    async def on_sync_config_clicked(self) -> None:
+        node_id = self._target_node()
+        if not node_id:
+            item = self.nodes_list.currentItem()
+            if item is not None:
+                node_id = item.text().splitlines()[0].strip()
+        if not node_id:
+            QMessageBox.warning(self, "Missing target", "Please select or input target node id.")
+            return
+        payload, digest = self._build_config_sync_payload()
+        ok = await self._sync_node_config_once(
+            node_id=node_id,
+            payload=payload,
+            digest=digest,
+            now=monotonic(),
+            force=True,
+        )
+        if ok:
+            QMessageBox.information(self, "Config Sync", f"Config synced to node: {node_id}")
+        else:
+            QMessageBox.warning(self, "Config Sync Failed", f"Config sync failed for node: {node_id}")
 
     @asyncSlot()
     async def on_agent_check_clicked(self) -> None:
@@ -2712,6 +3074,24 @@ class MainWindow(QMainWindow):
         self.settings_nats_url_input.setText(str(payload.get("nats_url", self.config.nats_url)))
         self.settings_nodes_input.setText(str(payload.get("node_candidates", ",".join(self.config.node_candidates))))
         self.settings_poll_input.setText(str(payload.get("poll_interval_sec", self.config.poll_interval_sec)))
+        discovery_enabled = bool(payload.get("discovery_enabled", self._discovery_enabled))
+        self.settings_discovery_enabled_input.setCurrentText("true" if discovery_enabled else "false")
+        self.settings_discovery_port_input.setText(str(payload.get("discovery_port", self._discovery_port)))
+        self.settings_discovery_max_age_input.setText(str(payload.get("discovery_max_age_sec", self._discovery_max_age_sec)))
+        auto_switch = bool(payload.get("discovery_auto_switch_nats", self._discovery_auto_switch_nats))
+        self.settings_discovery_auto_switch_input.setCurrentText("true" if auto_switch else "false")
+        language = normalize_language(str(payload.get("language", self._language)))
+        idx = self.settings_language_input.findData(language)
+        self.settings_language_input.setCurrentIndex(max(0, idx))
+        config_sync_enabled = bool(payload.get("config_sync_enabled", self._config_sync_enabled))
+        self.settings_config_sync_enabled_input.setCurrentText("true" if config_sync_enabled else "false")
+        self.settings_config_sync_interval_input.setText(
+            str(payload.get("config_sync_interval_sec", self._config_sync_interval_sec))
+        )
+        conflict_policy = str(payload.get("config_sync_conflict_policy", self._config_sync_conflict_policy)).strip().lower()
+        if conflict_policy not in CONFIG_SYNC_CONFLICT_POLICY_OPTIONS:
+            conflict_policy = CONFIG_SYNC_CONFLICT_POLICY_DEFAULT
+        self.settings_config_sync_conflict_policy_input.setCurrentText(conflict_policy)
         self.settings_log_level_input.setCurrentText(str(payload.get("log_level", "INFO")).upper())
         self.settings_log_file_input.setText(str(payload.get("log_file", self.settings_log_file_input.text())))
         self.settings_mcp_path_input.setText(str(payload.get("mcp_config_path", self.config.mcp_config_path)))
@@ -2754,12 +3134,43 @@ class MainWindow(QMainWindow):
         update_on_start = bool(payload.get("update_check_on_start", self._update_check_on_start))
         self.settings_update_check_on_start_input.setCurrentText("true" if update_on_start else "false")
         self.node_input.setText(self.settings_nodes_input.text())
-        self.config.node_candidates = self._iter_node_candidates()
+        self.config.node_candidates = self._iter_manual_node_candidates()
         self.config.nats_url = self.settings_nats_url_input.text().strip() or self.config.nats_url
         try:
             self.config.poll_interval_sec = max(0.5, float(self.settings_poll_input.text().strip()))
         except ValueError:
             pass
+        self._discovery_enabled = self.settings_discovery_enabled_input.currentText().strip().lower() == "true"
+        try:
+            self._discovery_port = max(1, int(self.settings_discovery_port_input.text().strip()))
+        except ValueError:
+            pass
+        try:
+            self._discovery_max_age_sec = max(2.0, float(self.settings_discovery_max_age_input.text().strip()))
+        except ValueError:
+            pass
+        self._discovery_auto_switch_nats = (
+            self.settings_discovery_auto_switch_input.currentText().strip().lower() == "true"
+        )
+        self._language = normalize_language(str(self.settings_language_input.currentData() or self._language))
+        self._config_sync_enabled = self.settings_config_sync_enabled_input.currentText().strip().lower() == "true"
+        try:
+            self._config_sync_interval_sec = max(5.0, float(self.settings_config_sync_interval_input.text().strip()))
+        except ValueError:
+            pass
+        conflict_policy = self.settings_config_sync_conflict_policy_input.currentText().strip().lower()
+        if conflict_policy in CONFIG_SYNC_CONFLICT_POLICY_OPTIONS:
+            self._config_sync_conflict_policy = conflict_policy
+        else:
+            self._config_sync_conflict_policy = CONFIG_SYNC_CONFLICT_POLICY_DEFAULT
+        self.config.language = self._language
+        self.config.config_sync_enabled = self._config_sync_enabled
+        self.config.config_sync_interval_sec = self._config_sync_interval_sec
+        self.config.config_sync_conflict_policy = self._config_sync_conflict_policy
+        self.config.discovery_enabled = self._discovery_enabled
+        self.config.discovery_port = self._discovery_port
+        self.config.discovery_max_age_sec = self._discovery_max_age_sec
+        self.config.discovery_auto_switch_nats = self._discovery_auto_switch_nats
         mcp_path = self.settings_mcp_path_input.text().strip()
         if mcp_path:
             self.config.mcp_config_path = mcp_path
@@ -2807,6 +3218,7 @@ class MainWindow(QMainWindow):
         self._update_asset_pattern = self.settings_update_asset_pattern_input.text().strip() or UPDATE_ASSET_PATTERN_DEFAULT
         self._update_check_on_start = self.settings_update_check_on_start_input.currentText().strip().lower() == "true"
         self._sync_retry_batch_runtime_inputs()
+        self._apply_language()
         self._refresh_header()
 
     def _build_settings_payload(self) -> dict[str, Any] | None:
@@ -2818,6 +3230,29 @@ class MainWindow(QMainWindow):
             poll_interval = max(0.5, float(self.settings_poll_input.text().strip()))
         except ValueError:
             self.settings_status_label.setText("Poll interval must be a number.")
+            return None
+        discovery_enabled = self.settings_discovery_enabled_input.currentText().strip().lower() == "true"
+        try:
+            discovery_port = max(1, int(self.settings_discovery_port_input.text().strip()))
+        except ValueError:
+            self.settings_status_label.setText("LAN discovery port must be an integer.")
+            return None
+        try:
+            discovery_max_age_sec = max(2.0, float(self.settings_discovery_max_age_input.text().strip()))
+        except ValueError:
+            self.settings_status_label.setText("LAN discovery max age must be a number.")
+            return None
+        discovery_auto_switch_nats = self.settings_discovery_auto_switch_input.currentText().strip().lower() == "true"
+        language = normalize_language(str(self.settings_language_input.currentData() or self._language))
+        config_sync_enabled = self.settings_config_sync_enabled_input.currentText().strip().lower() == "true"
+        try:
+            config_sync_interval_sec = max(5.0, float(self.settings_config_sync_interval_input.text().strip()))
+        except ValueError:
+            self.settings_status_label.setText("Config sync interval must be a number.")
+            return None
+        config_sync_conflict_policy = self.settings_config_sync_conflict_policy_input.currentText().strip().lower()
+        if config_sync_conflict_policy not in CONFIG_SYNC_CONFLICT_POLICY_OPTIONS:
+            self.settings_status_label.setText("Config sync conflict policy is invalid.")
             return None
         try:
             notification_max_items = int(self.settings_notification_max_items_input.text().strip())
@@ -2872,6 +3307,14 @@ class MainWindow(QMainWindow):
             "nats_url": nats_url,
             "node_candidates": self.settings_nodes_input.text().strip(),
             "poll_interval_sec": poll_interval,
+            "discovery_enabled": discovery_enabled,
+            "discovery_port": discovery_port,
+            "discovery_max_age_sec": discovery_max_age_sec,
+            "discovery_auto_switch_nats": discovery_auto_switch_nats,
+            "language": language,
+            "config_sync_enabled": config_sync_enabled,
+            "config_sync_interval_sec": config_sync_interval_sec,
+            "config_sync_conflict_policy": config_sync_conflict_policy,
             "log_level": self.settings_log_level_input.currentText().strip(),
             "log_file": self.settings_log_file_input.text().strip(),
             "mcp_config_path": self.settings_mcp_path_input.text().strip(),
@@ -2897,9 +3340,35 @@ class MainWindow(QMainWindow):
         if payload is None:
             return
         old_nats = self.config.nats_url
+        old_discovery_enabled = self._discovery_enabled
+        old_discovery_port = self._discovery_port
         self.config.nats_url = str(payload["nats_url"])
         self.config.node_candidates = [x.strip() for x in str(payload["node_candidates"]).split(",") if x.strip()]
         self.config.poll_interval_sec = float(payload["poll_interval_sec"])
+        self._discovery_enabled = bool(payload["discovery_enabled"])
+        self._discovery_port = int(payload["discovery_port"])
+        self._discovery_max_age_sec = float(payload["discovery_max_age_sec"])
+        self._discovery_auto_switch_nats = bool(payload["discovery_auto_switch_nats"])
+        self._language = normalize_language(str(payload["language"]))
+        self._config_sync_enabled = bool(payload["config_sync_enabled"])
+        self._config_sync_interval_sec = float(payload["config_sync_interval_sec"])
+        policy = str(payload["config_sync_conflict_policy"]).strip().lower()
+        self._config_sync_conflict_policy = (
+            policy if policy in CONFIG_SYNC_CONFLICT_POLICY_OPTIONS else CONFIG_SYNC_CONFLICT_POLICY_DEFAULT
+        )
+        self._discovery_auto_switch_last_attempt = None
+        self.config.discovery_enabled = self._discovery_enabled
+        self.config.discovery_port = self._discovery_port
+        self.config.discovery_max_age_sec = self._discovery_max_age_sec
+        self.config.discovery_auto_switch_nats = self._discovery_auto_switch_nats
+        self.config.language = self._language
+        self.config.config_sync_enabled = self._config_sync_enabled
+        self.config.config_sync_interval_sec = self._config_sync_interval_sec
+        self.config.config_sync_conflict_policy = self._config_sync_conflict_policy
+        self._config_sync_last_run_monotonic = 0.0
+        self._config_sync_last_digest = ""
+        self._config_sync_node_digest.clear()
+        self._config_sync_retry_after.clear()
         mcp_path = str(payload["mcp_config_path"]).strip()
         if mcp_path:
             self.config.mcp_config_path = mcp_path
@@ -2938,7 +3407,11 @@ class MainWindow(QMainWindow):
                 self._notifications = self._notifications[overflow:]
         self._refresh_notifications_view()
         self.node_input.setText(",".join(self.config.node_candidates))
+        self._apply_language()
         self._refresh_header()
+        if old_discovery_enabled != self._discovery_enabled or old_discovery_port != self._discovery_port:
+            await self._stop_discovery_listener()
+            await self._start_discovery_listener()
         if self.config.nats_url != old_nats:
             try:
                 await self.service.close()

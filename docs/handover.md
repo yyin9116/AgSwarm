@@ -1,4 +1,4 @@
-﻿# Workflow 交接文档（更新于 2026-03-01）
+﻿# Workflow 交接文档（更新于 2026-03-02）
 
 ## 0. 主线阶段判断（当前到哪里）
 
@@ -95,6 +95,15 @@
 29. Windows 打包脚本已补齐 PySide6/qasync 收集参数，`dist/workflow-desktop/workflow-desktop.exe --help` 可正常运行。
 30. 修复 Windows 上传链路稳定性问题：`nats_bridge` 文件提交阶段对 `replace/unlink` 增强容错与短重试，消除 `WinError 32/2` 导致的上传偶发失败。
 31. 新增本地 Phase-2 基线脚本：`scripts/phase2_local_baseline.py`（自动拉起 nats + node + regression 并输出报告）。
+32. Node snapshot 新增 MCP 能力摘要字段：`capability_summary` 与 `mcp_services`。
+33. Desktop `Online Nodes` 与 `Agent Check` 已展示 MCP 服务摘要。
+34. Desktop 已接入自动更新检查（启动检查 + 手动检查，支持 GitHub Release feed/asset pattern 配置）。
+35. 应用图标链路已接入：`scripts/generate_app_icon.py` 生成 `assets/icons/app-icon.(png/ico/icns)`，运行时窗口/托盘与打包产物图标已替换。
+36. 局域网自动发现已接入（Node UDP 广播 + Desktop UDP 监听）：Desktop 可自动合并发现节点，并在当前 NATS 为 loopback 时自动切换到发现到的 LAN NATS URL（可在 Settings 关闭）。
+37. Desktop->Node 配置同步协议已接入：节点支持 `config.sync` 请求并持久化配置快照；snapshot/status 已包含 `config_sync_revision/config_sync_digest/config_synced_by/config_synced_at`。
+38. Desktop 设置页已新增语言切换（`en-US/zh-CN`）与配置同步开关/间隔；`Apply Runtime` 后立即生效并持久化。
+39. 桌面主界面三栏已加入纵向滚动容器，并下调默认窗口尺寸，缓解 macOS 下“上下显示不全”问题。
+40. 配置同步冲突策略已接入（`desktop_wins/node_wins/manual`），并在节点列表增加 `Sync Config` 手动同步按钮，支持冲突时人工覆盖。
 
 说明：
 
@@ -141,16 +150,15 @@
 
 ## 3. 关键文档
 
-1. `workflow-control-spec.md`
-2. `ui-prd.md`
-3. `program-blueprint.md`
-4. `docs/nats-dev-quickstart.md`
-5. `docs/mac-win-smoke-test.md`
-6. `docs/desktop-client-tech-selection.md`
-7. `docs/desktop-client-dev.md`
-8. `docs/skills-config.md`
-9. `docs/project-structure.md`
-10. `docs/mainline-roadmap.md`
+1. `docs/nats-dev-quickstart.md`
+2. `docs/mac-win-smoke-test.md`
+3. `docs/desktop-client-tech-selection.md`
+4. `docs/desktop-client-dev.md`
+5. `docs/skills-config.md`
+6. `docs/project-structure.md`
+7. `docs/mainline-roadmap.md`
+8. `docs/phase-overview.md`
+9. `docs/phase2-checklist.md`
 
 ## 4. 实测进展
 
@@ -175,11 +183,10 @@
 ## 5. 当前未完成项
 
 1. 跨机 E2E（mac -> win）尚未在真实双机环境完成固定轮次固化（本地单机基线已通过）。
-2. 下载回传已实现文件级与目录级能力（含分页与并发策略），跨机稳定性尚需强化。
-3. 真实多 MCP 场景（不仅 latex-mcp）尚未全面验证。
-4. 桌面端仍是 MVP；通知中心基础版、策略基础配置、托盘最小闭环、单任务重试与批量重试策略配置（含负载感知/退避）已可用，但缺更细粒度时间线与跨机稳定性固化。
-5. 构建签名未接入（Windows code sign / macOS notarization）。
-6. 打包体积与插件裁剪策略未优化（当前 `--collect-all PySide6` 体积较大，后续可按模块精简）。
+2. 跨机 LaTeX 场景（`--skip-latex` 关闭）尚未形成固定样本报告。
+3. 跨机失败归因记录模板尚未沉淀（网络/环境/MCP/协议分类）。
+4. 构建签名未接入（Windows code sign / macOS notarization）。
+5. 打包体积与插件裁剪策略未优化（当前 `--collect-all PySide6` 体积较大，后续可按模块精简）。
 
 ## 6. 下一步建议（优先级）
 
@@ -192,5 +199,6 @@
 ## 7. 根目录结构说明
 
 根目录结构与模块职责已单独整理：`docs/project-structure.md`。
+
 
 

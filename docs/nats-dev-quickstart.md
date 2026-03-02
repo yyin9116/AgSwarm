@@ -44,6 +44,12 @@ set WORKFLOW_NODE_ID=node-a
 python -m workflow_cli --log-level DEBUG --log-file tmp/test-logs/node.app.log node --node-id node-a --nats-url nats://127.0.0.1:4222
 ```
 
+Node 默认会通过 UDP 广播做 LAN 自动发现（端口 `48666`），可选参数：
+
+```bash
+python -m workflow_cli node --node-id node-a --nats-url nats://127.0.0.1:4222 --discovery-port 48666 --discovery-interval-sec 2
+```
+
 Enable skills config (optional):
 
 ```bash
@@ -68,6 +74,26 @@ Expected flow:
 1. Client submits a task.
 2. Node publishes status updates.
 3. Client receives task events (`task.accepted`, `adapter.started`, `adapter.token`, `adapter.completed`).
+
+Desktop 端（AgSwarm）默认也已开启 LAN 自动发现。即使不手填 `Node Candidates`，也会基于广播自动显示节点，并在当前 NATS 为 loopback 时尝试自动切换到发现到的 LAN NATS URL。
+
+Desktop 默认会定期向已连接节点推送配置快照（MCP 列表、语言、基础运行参数），用于快速组网后的配置对齐。可通过启动参数关闭：
+
+```bash
+python -m workflow_desktop --disable-config-sync
+```
+
+可指定语言（支持 `en-US` / `zh-CN`）：
+
+```bash
+python -m workflow_desktop --language zh-CN
+```
+
+配置同步冲突策略可在 Desktop Settings 中调整：
+
+1. `desktop_wins`：本地配置覆盖节点。
+2. `node_wins`：检测到冲突时保留节点侧配置。
+3. `manual`：冲突时不自动覆盖，使用左侧 `Sync Config` 手动同步。
 
 ## 5. Current scope
 

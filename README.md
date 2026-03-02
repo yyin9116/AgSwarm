@@ -36,6 +36,12 @@ $env:PYTHONPATH = "src"
 python -m workflow_cli node --node-id node-a --nats-url nats://127.0.0.1:4222 --skills-config configs/skills.example.json
 ```
 
+默认已开启局域网自动发现（UDP 广播），桌面端会自动看到节点；如需关闭：
+
+```powershell
+python -m workflow_cli node --node-id node-a --nats-url nats://127.0.0.1:4222 --disable-discovery
+```
+
 再开一个终端提交任务：
 
 ```powershell

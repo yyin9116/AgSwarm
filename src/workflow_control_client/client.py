@@ -83,6 +83,22 @@ class WorkflowControlClient:
             timeout_sec=timeout_sec,
         )
 
+    async def sync_node_config(
+        self,
+        *,
+        node_id: str,
+        config_payload: dict,
+        timeout_sec: float = 4.0,
+    ) -> dict:
+        return await self.transport.request(
+            subjects.node_config_sync_request(node_id),
+            {
+                "from_client_id": self.client_id,
+                "config_payload": config_payload,
+            },
+            timeout_sec=timeout_sec,
+        )
+
     async def upload_file(
         self,
         *,

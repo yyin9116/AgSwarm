@@ -23,6 +23,10 @@ def node_snapshot_request(node_id: str) -> str:
     return f"{ROOT}.nodes.{node_id}.snapshot.request"
 
 
+def node_config_sync_request(node_id: str) -> str:
+    return f"{ROOT}.nodes.{node_id}.config.sync"
+
+
 def file_prepare_request(node_id: str) -> str:
     return f"{ROOT}.nodes.{node_id}.files.prepare"
 

@@ -5,7 +5,14 @@ import asyncio
 import json
 import logging
 import os
+from dataclasses import asdict
 
+from workflow_discovery import (
+    DISCOVERY_BROADCAST_DEFAULT,
+    DISCOVERY_PORT_DEFAULT,
+    LanNodeBroadcaster,
+    resolve_advertise_nats_url,
+)
 from workflow_control_client import WorkflowControlClient
 from workflow_logging import setup_logging
 from workflow_node_daemon import NatsDaemonBridge, WorkflowNodeDaemon
@@ -18,6 +25,13 @@ from workflow_runtime.runtime import Runtime
 from workflow_transport import NatsTransportProvider
 
 logger = logging.getLogger(__name__)
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _parse_skills(raw: str | None) -> list[str]:
@@ -73,9 +87,26 @@ async def cmd_node(args: argparse.Namespace) -> None:
         daemon=daemon,
         transport=transport,
     )
+    broadcaster: LanNodeBroadcaster | None = None
 
     await daemon.start()
     await bridge.start()
+    discovery_enabled = not bool(args.disable_discovery)
+    advertise_nats_url = ""
+    if discovery_enabled:
+        advertise_nats_url = resolve_advertise_nats_url(
+            args.nats_url,
+            explicit_advertise_url=(args.advertise_nats_url or None),
+        )
+        broadcaster = LanNodeBroadcaster(
+            node_id=args.node_id,
+            nats_url=advertise_nats_url,
+            port=max(1, int(args.discovery_port)),
+            broadcast_addr=str(args.discovery_broadcast),
+            interval_sec=max(0.5, float(args.discovery_interval_sec)),
+            snapshot_provider=lambda: asdict(daemon.get_node_snapshot()),
+        )
+        await broadcaster.start()
     print(
         json.dumps(
             {
@@ -87,6 +118,11 @@ async def cmd_node(args: argparse.Namespace) -> None:
                 "latex_workspace": args.latex_workspace,
                 "latex_server_cwd": args.latex_server_cwd,
                 "skills_config": args.skills_config,
+                "discovery_enabled": discovery_enabled,
+                "discovery_port": int(args.discovery_port),
+                "discovery_broadcast": str(args.discovery_broadcast),
+                "discovery_interval_sec": float(args.discovery_interval_sec),
+                "advertise_nats_url": advertise_nats_url if discovery_enabled else "",
             },
             ensure_ascii=False,
         )
@@ -95,6 +131,8 @@ async def cmd_node(args: argparse.Namespace) -> None:
         while True:
             await asyncio.sleep(60)
     finally:
+        if broadcaster is not None:
+            await broadcaster.stop()
         await bridge.stop()
         await daemon.stop()
 
@@ -344,6 +382,34 @@ def build_parser() -> argparse.ArgumentParser:
     node.add_argument("--default-retries", type=int, default=1)
     node.add_argument("--latex-workspace", default=None)
     node.add_argument("--latex-server-cwd", default=None)
+    node.add_argument(
+        "--disable-discovery",
+        action="store_true",
+        default=_env_flag("WORKFLOW_DISABLE_DISCOVERY", default=False),
+        help="Disable LAN UDP auto-discovery broadcast.",
+    )
+    node.add_argument(
+        "--discovery-port",
+        type=int,
+        default=int(os.getenv("WORKFLOW_DISCOVERY_PORT", str(DISCOVERY_PORT_DEFAULT))),
+        help="UDP port for LAN discovery broadcast/listen.",
+    )
+    node.add_argument(
+        "--discovery-interval-sec",
+        type=float,
+        default=float(os.getenv("WORKFLOW_DISCOVERY_INTERVAL_SEC", "2.0")),
+        help="Seconds between node discovery heartbeats.",
+    )
+    node.add_argument(
+        "--discovery-broadcast",
+        default=os.getenv("WORKFLOW_DISCOVERY_BROADCAST", DISCOVERY_BROADCAST_DEFAULT),
+        help="Discovery broadcast address (default 255.255.255.255).",
+    )
+    node.add_argument(
+        "--advertise-nats-url",
+        default=os.getenv("WORKFLOW_ADVERTISE_NATS_URL", ""),
+        help="Optional advertised NATS URL for discovery payload.",
+    )
     node.add_argument(
         "--skills-config",
         default=os.getenv("WORKFLOW_SKILLS_CONFIG"),

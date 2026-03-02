@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -94,6 +95,7 @@ class NatsDaemonBridge:
         self.event_poll_interval_sec = event_poll_interval_sec
         root = Path(incoming_root) if incoming_root else Path(".workflow_node_data")
         self.incoming_root = root / self.node_id / "incoming"
+        self.config_root = root / self.node_id / "config"
         self.manage_transport = manage_transport
 
         self._running = False
@@ -104,6 +106,14 @@ class NatsDaemonBridge:
         self._transfer_lock = asyncio.Lock()
         self._download_sessions: dict[str, _FileDownloadSession] = {}
         self._download_lock = asyncio.Lock()
+        self._config_sync_lock = asyncio.Lock()
+        self._config_sync_state: dict[str, Any] = {
+            "config_sync_revision": 0,
+            "config_synced_at": None,
+            "config_synced_by": None,
+            "config_sync_digest": None,
+            "config_sync_sections": [],
+        }
 
     async def start(self) -> None:
         if self._running:
@@ -127,6 +137,12 @@ class NatsDaemonBridge:
             await self.transport.subscribe(
                 subjects.node_snapshot_request(self.node_id),
                 self._on_snapshot_request,
+            )
+        )
+        self._subscriptions.append(
+            await self.transport.subscribe(
+                subjects.node_config_sync_request(self.node_id),
+                self._on_config_sync_request,
             )
         )
         self._subscriptions.append(
@@ -207,7 +223,67 @@ class NatsDaemonBridge:
             return
         snapshot = asdict(self.daemon.get_node_snapshot())
         snapshot["node_id"] = self.node_id
+        snapshot.update(self._config_sync_state)
         await self.transport.publish(reply_subject, snapshot)
+
+    async def _on_config_sync_request(self, _: str, payload: dict, reply_subject: str | None) -> None:
+        if not reply_subject:
+            return
+        config_payload = payload.get("config_payload")
+        from_client_id = str(payload.get("from_client_id", "")).strip() or "unknown-client"
+        if not isinstance(config_payload, dict):
+            await self.transport.publish(
+                reply_subject,
+                {"ok": False, "error": "invalid_config_payload"},
+            )
+            return
+
+        self.config_root.mkdir(parents=True, exist_ok=True)
+        normalized = json.dumps(config_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        now_iso = datetime.now().isoformat(timespec="seconds")
+
+        async with self._config_sync_lock:
+            next_revision = int(self._config_sync_state.get("config_sync_revision", 0)) + 1
+            latest_path = self.config_root / "node-config-sync.latest.json"
+            revision_path = self.config_root / f"node-config-sync.r{next_revision:04d}.json"
+            envelope = {
+                "node_id": self.node_id,
+                "revision": next_revision,
+                "synced_at": now_iso,
+                "synced_by": from_client_id,
+                "digest": digest,
+                "config_payload": config_payload,
+            }
+            revision_path.write_text(json.dumps(envelope, ensure_ascii=False, indent=2), encoding="utf-8")
+            latest_path.write_text(json.dumps(envelope, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._config_sync_state = {
+                "config_sync_revision": next_revision,
+                "config_synced_at": now_iso,
+                "config_synced_by": from_client_id,
+                "config_sync_digest": digest,
+                "config_sync_sections": sorted(str(x) for x in config_payload.keys()),
+            }
+
+        logger.info(
+            "config sync applied node_id=%s revision=%d synced_by=%s digest=%s",
+            self.node_id,
+            next_revision,
+            from_client_id,
+            digest,
+        )
+        await self.transport.publish(
+            reply_subject,
+            {
+                "ok": True,
+                "node_id": self.node_id,
+                "config_sync_revision": next_revision,
+                "config_synced_at": now_iso,
+                "config_synced_by": from_client_id,
+                "config_sync_digest": digest,
+                "saved_path": str(latest_path.resolve()),
+            },
+        )
 
     async def _on_file_prepare_request(
         self,
@@ -740,6 +816,7 @@ class NatsDaemonBridge:
         while self._running:
             payload = asdict(self.daemon.get_node_snapshot())
             payload["node_id"] = self.node_id
+            payload.update(self._config_sync_state)
             await self.transport.publish(subjects.node_status(self.node_id), payload)
             await asyncio.sleep(self.status_interval_sec)
 

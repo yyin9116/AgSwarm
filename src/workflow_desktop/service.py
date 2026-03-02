@@ -43,6 +43,20 @@ class DesktopControlService:
         await self.ensure_connected()
         return await self._client.request_node_snapshot(node_id=node_id, timeout_sec=timeout_sec)
 
+    async def sync_node_config(
+        self,
+        *,
+        node_id: str,
+        config_payload: dict,
+        timeout_sec: float = 4.0,
+    ) -> dict:
+        await self.ensure_connected()
+        return await self._client.sync_node_config(
+            node_id=node_id,
+            config_payload=config_payload,
+            timeout_sec=timeout_sec,
+        )
+
     async def agent_check(
         self,
         *,
