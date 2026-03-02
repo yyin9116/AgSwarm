@@ -18,8 +18,6 @@ jobs:
         include:
           - os: windows-2022
             target: windows-x64
-          - os: macos-15-intel
-            target: macos-intel
           - os: macos-15
             target: macos-apple-silicon
     runs-on: ${{ matrix.os }}
@@ -44,8 +42,13 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install create-dmg
 
-      - name: Build desktop package
+      - name: Build desktop package (Windows zip)
+        if: runner.os == 'Windows'
         run: python scripts/build_desktop.py --clean --name ${{ env.APP_NAME }}
+
+      - name: Build desktop package (macOS arm64 dmg only)
+        if: runner.os == 'macOS'
+        run: python scripts/build_desktop.py --clean --name ${{ env.APP_NAME }} --dmg --no-zip
 
       - name: Generate checksums (Windows)
         if: runner.os == 'Windows'

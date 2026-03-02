@@ -66,9 +66,8 @@ git push origin v0.2.0
 
 产物说明：
 
-1. macOS：`AgSwarm-macos-*.dmg`（可直接下载安装）
-   - `AgSwarm-macos-arm64.dmg`：Apple Silicon (M1/M2/M3)
-   - `AgSwarm-macos-x86_64.dmg`：Intel Mac
+1. macOS：默认仅发布 `AgSwarm-macos-arm64.dmg`（Apple Silicon, M1/M2/M3）
+   - Intel Mac 如需安装包，建议在 Intel runner 或本地单独构建
 2. Windows：`AgSwarm-windows-x64.zip`
 3. 校验文件：`SHA256SUMS.txt`
 
