@@ -109,18 +109,13 @@ jobs:
       - name: Display assets
         run: ls -R release-assets
 
-      - name: Prepare release notes body
+      - name: Check custom release notes
         id: notes
         shell: bash
         run: |
           NOTES_FILE="docs/releases/${GITHUB_REF_NAME}.md"
           if [[ -f "${NOTES_FILE}" ]]; then
             echo "use_custom=true" >> "$GITHUB_OUTPUT"
-            {
-              echo "body<<'EOF'"
-              cat "${NOTES_FILE}"
-              echo "EOF"
-            } >> "$GITHUB_OUTPUT"
           else
             echo "use_custom=false" >> "$GITHUB_OUTPUT"
           fi
@@ -132,7 +127,7 @@ jobs:
           files: |
             release-assets/**/*.zip
             release-assets/**/*.dmg
-          body: ${{ steps.notes.outputs.body }}
+          body_path: docs/releases/${{ github.ref_name }}.md
 
       - name: Publish GitHub Release (auto notes)
         if: steps.notes.outputs.use_custom != 'true'
