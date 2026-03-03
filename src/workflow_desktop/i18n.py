@@ -16,7 +16,7 @@ EN_TO_ZH: dict[str, str] = {
     "MCP Config": "MCP 配置",
     "Settings": "设置",
     "Workflow Controller Prototype (Desktop)": "工作流控制端原型（桌面）",
-    "LAN task dispatch, MCP execution, artifact return and live telemetry": "局域网任务下发、MCP 执行、产物回传与实时遥测",
+    "LAN task dispatch, MCP execution, artifact return and live telemetry": "局域网任务分发、MCP 执行、产物回传与实时遥测",
     "Online Nodes": "在线节点",
     "Create and Dispatch Task": "创建并下发任务",
     "Task Queue and Artifacts": "任务队列与产物",
@@ -46,13 +46,11 @@ EN_TO_ZH: dict[str, str] = {
     "Reload Settings": "重载设置",
     "Check Updates": "检查更新",
     "Ready": "就绪",
+    "Current Version": "当前版本",
+    "Settings path": "设置文件路径",
     "NATS URL": "NATS 地址",
     "Node Candidates": "节点候选",
     "Poll Interval": "轮询间隔",
-    "Log Level": "日志级别",
-    "Log File": "日志文件",
-    "MCP Config Path": "MCP 配置路径",
-    "Current Version": "当前版本",
     "LAN Discovery Enabled": "启用局域网发现",
     "LAN Discovery Port": "局域网发现端口",
     "LAN Discovery Max Age (sec)": "发现有效期（秒）",
@@ -61,6 +59,25 @@ EN_TO_ZH: dict[str, str] = {
     "Config Sync Enabled": "启用配置同步",
     "Config Sync Interval (sec)": "配置同步间隔（秒）",
     "Config Sync Conflict Policy": "配置冲突策略",
+    "Log Level": "日志级别",
+    "Log File": "日志文件",
+    "MCP Config Path": "MCP 配置路径",
+    "Notification Max Items": "通知最大条数",
+    "Notification Dedupe Window (sec)": "通知去重窗口（秒）",
+    "Notification Auto Mark Read": "通知自动标记已读",
+    "Retry Batch Max Limit": "批量重试上限",
+    "Retry Batch Interval (sec)": "批量重试间隔（秒）",
+    "Retry Batch Skip Kinds": "批量重试跳过类型",
+    "Retry Reroute Mode": "失败重试改道模式",
+    "Retry Attempts Per Task": "单任务重试次数",
+    "Retry Backoff Base (sec)": "重试退避基准（秒）",
+    "Update Enabled": "启用更新",
+    "Update Feed URL": "更新源 URL",
+    "Update Asset Pattern": "更新产物匹配规则",
+    "Update Check On Start": "启动时检查更新",
+    "Connection status: not connected": "连接状态：未连接",
+    "Connection status: Connecting...": "连接状态：连接中...",
+    "Connection status: Connected": "连接状态：已连接",
 }
 
 ZH_TO_EN = {v: k for k, v in EN_TO_ZH.items()}
@@ -76,9 +93,5 @@ def normalize_language(value: str | None) -> str:
 def translate_text(text: str, language: str) -> str:
     target = normalize_language(language)
     if target == "zh-CN":
-        if text in EN_TO_ZH:
-            return EN_TO_ZH[text]
-        return text
-    if text in ZH_TO_EN:
-        return ZH_TO_EN[text]
-    return text
+        return EN_TO_ZH.get(text, text)
+    return ZH_TO_EN.get(text, text)

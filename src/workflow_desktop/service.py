@@ -24,6 +24,10 @@ class DesktopControlService:
     def nats_url(self) -> str:
         return self._nats_url
 
+    @property
+    def connected(self) -> bool:
+        return self._connected
+
     async def connect(self) -> None:
         async with self._lock:
             if self._connected:

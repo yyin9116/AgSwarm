@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from time import monotonic
 from typing import Any
+from urllib.parse import urlsplit
 
 from PySide6.QtCore import QSize, Qt, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QGuiApplication, QPixmap
@@ -87,6 +88,7 @@ RETRY_ATTEMPTS_PER_TASK_DEFAULT = 2
 RETRY_BACKOFF_BASE_SEC_DEFAULT = 0.8
 UPDATE_FEED_URL_DEFAULT = os.getenv("WORKFLOW_UPDATE_FEED_URL", "").strip()
 DEFAULT_DESKTOP_LOG_FILE = str(Path.home() / ".workflow-desktop" / "logs" / "desktop.app.log")
+CONNECT_TIMEOUT_SEC = 8.0
 if sys.platform == "darwin":
     UPDATE_ASSET_PATTERN_DEFAULT = "*macos-*.dmg"
 elif os.name == "nt":
@@ -150,6 +152,8 @@ class MainWindow(QMainWindow):
         self._config_sync_conflict_policy = (
             policy if policy in CONFIG_SYNC_CONFLICT_POLICY_OPTIONS else CONFIG_SYNC_CONFLICT_POLICY_DEFAULT
         )
+        self._connection_state = "disconnected"
+        self._last_connection_error = ""
 
         self.setWindowTitle("AgSwarm")
         self.resize(1460, 900)
@@ -190,8 +194,11 @@ class MainWindow(QMainWindow):
         online = sum(1 for _, snap in self._last_snapshots if snap is not None)
         lan_seen = len(self._discovered_nodes)
         runtime = "running" if self._running else "ready"
+        conn = self._connection_state
         self.status_left_label.setText(
-            f"Controller: {self.config.client_id} | Network: {online}/{configured} online | LAN discovered: {lan_seen} | Runtime: {runtime}"
+            "Controller: "
+            f"{self.config.client_id} | Connection: {conn} | "
+            f"Network: {online}/{configured} online | LAN discovered: {lan_seen} | Runtime: {runtime}"
         )
         self.status_right_label.setText(f"Last sync {datetime.now().strftime('%H:%M:%S')}")
 
@@ -217,7 +224,12 @@ class MainWindow(QMainWindow):
             text = button.text().strip()
             if text:
                 button.setText(self._tr(text))
+        self._update_settings_path_label()
         self._refresh_header()
+
+    def _update_settings_path_label(self) -> None:
+        if hasattr(self, "settings_path_label"):
+            self.settings_path_label.setText(f"{self._tr('Settings path')}: {self.config.settings_path}")
 
     def _build_top_status_bar(self) -> QWidget:
         bar = QWidget()
@@ -335,8 +347,8 @@ class MainWindow(QMainWindow):
             QTabBar::tab:selected { background: #FFFFFF; border-bottom-color: #FFFFFF; }
             QListWidget, QPlainTextEdit, QLineEdit, QTableWidget { background: #FFFFFF; border: 1px solid #D6DEE9; border-radius: 8px; }
             QLineEdit, QComboBox {
-                min-height: 34px;
-                padding: 4px 8px;
+                min-height: 30px;
+                padding: 3px 8px;
             }
             QListWidget#nodeCards::item { margin: 6px; padding: 10px; border: 1px solid #D8E1EC; border-radius: 10px; background: #FFFFFF; }
             QListWidget#nodeCards::item:selected { background: #EAF2FF; border-color: #BFD3F4; color: #1D3248; }
@@ -785,9 +797,22 @@ class MainWindow(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         self.settings_status_label = QLabel("Ready")
+        self.settings_status_label.setWordWrap(True)
         layout.addWidget(self.settings_status_label)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         form_widget = QWidget()
+        scroll.setWidget(form_widget)
         form = QFormLayout(form_widget)
+        form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        form.setFormAlignment(Qt.AlignTop | Qt.AlignLeft)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
         self.settings_nats_url_input = QLineEdit(self.config.nats_url)
         self.settings_nodes_input = QLineEdit(",".join(self.config.node_candidates))
         self.settings_poll_input = QLineEdit(str(self.config.poll_interval_sec))
@@ -832,7 +857,8 @@ class MainWindow(QMainWindow):
         self.settings_update_check_on_start_input = QComboBox()
         self.settings_update_check_on_start_input.addItems(["true", "false"])
         self.settings_version_label = QLabel(self._current_version)
-        form.addRow(QLabel(f"Settings path: {self.config.settings_path}"))
+        self.settings_path_label = QLabel()
+        form.addRow(self.settings_path_label)
         form.addRow("Current Version", self.settings_version_label)
         form.addRow("NATS URL", self.settings_nats_url_input)
         form.addRow("Node Candidates", self.settings_nodes_input)
@@ -861,7 +887,7 @@ class MainWindow(QMainWindow):
         form.addRow("Update Feed URL", self.settings_update_feed_url_input)
         form.addRow("Update Asset Pattern", self.settings_update_asset_pattern_input)
         form.addRow("Update Check On Start", self.settings_update_check_on_start_input)
-        layout.addWidget(form_widget)
+        layout.addWidget(scroll, 1)
         row = QHBoxLayout()
         apply_btn = QPushButton("Apply Runtime")
         apply_btn.clicked.connect(self.on_settings_apply)
@@ -877,6 +903,7 @@ class MainWindow(QMainWindow):
         row.addWidget(check_update_btn)
         row.addStretch(1)
         layout.addLayout(row)
+        self._update_settings_path_label()
         return page
 
     async def start(self) -> None:
@@ -885,16 +912,19 @@ class MainWindow(QMainWindow):
         self._running = True
         await self._start_discovery_listener()
         try:
-            await self.service.connect()
+            await asyncio.wait_for(self.service.connect(), timeout=CONNECT_TIMEOUT_SEC)
             self._append_log(f"desktop connected nats={self.config.nats_url}")
-            self._set_connection_feedback("Connected", ok=True)
+            self._set_connection_state(state="connected")
+            self._set_connection_feedback("Connected", level="ok")
         except Exception as exc:
-            self._append_log(f"desktop startup connect failed: {exc}")
-            self._set_connection_feedback(f"Connect failed: {exc}", ok=False)
+            detail = self._format_connect_error(exc)
+            self._append_log(f"desktop startup connect failed: {detail}")
+            self._set_connection_state(state="disconnected", error=detail)
+            self._set_connection_feedback(f"Connect failed: {detail}", level="error")
             self._add_notification(
                 level="warning",
                 title="Startup Connect Failed",
-                message=str(exc),
+                message=detail,
                 category="network",
                 context={"nats_url": self.config.nats_url},
             )
@@ -911,6 +941,7 @@ class MainWindow(QMainWindow):
             self._poll_task = None
         await self._stop_discovery_listener()
         await self.service.close()
+        self._set_connection_state(state="disconnected")
 
     async def _start_discovery_listener(self) -> None:
         if not self._discovery_enabled:
@@ -982,6 +1013,8 @@ class MainWindow(QMainWindow):
             await self.service.connect()
         except Exception as exc:
             self._append_log(f"auto switch nats failed: {exc}")
+            self._set_connection_state(state="disconnected", error=self._format_connect_error(exc))
+            self._set_connection_feedback(f"Auto switch failed: {self._format_connect_error(exc)}", level="error")
             self._add_notification(
                 level="warning",
                 title="Auto Switch NATS Failed",
@@ -992,11 +1025,15 @@ class MainWindow(QMainWindow):
             self.service = DesktopControlService(client_id=self.config.client_id, nats_url=old_url)
             try:
                 await self.service.connect()
+                self._set_connection_state(state="connected")
+                self._set_connection_feedback("Connected", level="ok")
             except Exception as restore_exc:
                 self._append_log(f"restore nats failed: {restore_exc}")
             return
         self.config.nats_url = candidate
         self.settings_nats_url_input.setText(candidate)
+        self._set_connection_state(state="connected")
+        self._set_connection_feedback("Connected", level="ok")
         self._add_notification(
             level="info",
             title="Auto Switched NATS",
@@ -1126,17 +1163,39 @@ class MainWindow(QMainWindow):
         except RuntimeError:
             logger.debug("statusBar is no longer available", exc_info=True)
 
-    def _set_connection_feedback(self, text: str, *, ok: bool) -> None:
+    def _set_connection_state(self, *, state: str, error: str = "") -> None:
+        self._connection_state = state
+        self._last_connection_error = error.strip()
+        self._refresh_header()
+
+    def _format_connect_error(self, exc: Exception) -> str:
+        raw = str(exc).strip() or exc.__class__.__name__
+        try:
+            parsed = urlsplit(self.config.nats_url)
+            host = parsed.hostname or "unknown-host"
+            port = parsed.port or 0
+            return (
+                f"{raw}. target={host}:{port}. "
+                "Check NATS URL / username / password / firewall / server status."
+            )
+        except Exception:
+            return raw
+
+    def _set_connection_feedback(self, text: str, *, level: str) -> None:
         if not hasattr(self, "connection_feedback_label"):
             return
-        self.connection_feedback_label.setText(f"Connection status: {text}")
-        if ok:
+        self.connection_feedback_label.setText(self._tr(f"Connection status: {text}"))
+        if level == "ok":
             self.connection_feedback_label.setStyleSheet(
                 "QLabel { background: #E8F8EE; color: #1D6E43; border: 1px solid #BDE7CB; border-radius: 8px; padding: 6px 8px; }"
             )
-        else:
+        elif level == "error":
             self.connection_feedback_label.setStyleSheet(
                 "QLabel { background: #FDEDED; color: #A23535; border: 1px solid #F3C5C5; border-radius: 8px; padding: 6px 8px; }"
+            )
+        else:
+            self.connection_feedback_label.setStyleSheet(
+                "QLabel { background: #EEF2F6; color: #334A62; border: 1px solid #D3DEE9; border-radius: 8px; padding: 6px 8px; }"
             )
 
     def _add_notification(
@@ -1382,7 +1441,7 @@ class MainWindow(QMainWindow):
                 self._append_log(f"poll failed: {exc}")
             await asyncio.sleep(max(0.5, self.config.poll_interval_sec))
 
-    async def _refresh_nodes(self) -> None:
+    async def _refresh_nodes(self) -> dict[str, Any]:
         await self._refresh_discovered_nodes()
         node_ids = self._iter_node_candidates()
         if not node_ids:
@@ -1390,14 +1449,16 @@ class MainWindow(QMainWindow):
             self.nodes_list.clear()
             self.node_count_label.setText("0 active")
             self._refresh_header()
-            return
+            return {"node_count": 0, "active_count": 0, "error_count": 0, "sample_error": ""}
         snapshots: list[tuple[str, dict | None]] = []
+        errors: list[str] = []
         for node_id in node_ids:
             try:
                 snap = await self.service.request_node_snapshot(node_id=node_id, timeout_sec=1.5)
                 snapshots.append((node_id, snap))
-            except Exception:
+            except Exception as exc:
                 snapshots.append((node_id, None))
+                errors.append(str(exc).strip() or exc.__class__.__name__)
         self._last_snapshots = snapshots
         await self._maybe_sync_config_to_nodes(snapshots)
         self.nodes_list.clear()
@@ -1445,7 +1506,17 @@ class MainWindow(QMainWindow):
             self.nodes_list.addItem(item)
         self.node_count_label.setText(f"{active_count} active")
         self._apply_node_search_filter()
+        if len(errors) == len(node_ids) and errors:
+            self._set_connection_state(state="disconnected", error=errors[0])
+        elif active_count > 0:
+            self._set_connection_state(state="connected")
         self._refresh_header()
+        return {
+            "node_count": len(node_ids),
+            "active_count": active_count,
+            "error_count": len(errors),
+            "sample_error": errors[0] if errors else "",
+        }
 
     def _apply_node_search_filter(self) -> None:
         pattern = self.node_search_input.text().strip().lower()
@@ -2002,10 +2073,12 @@ class MainWindow(QMainWindow):
     @asyncSlot()
     async def on_connect_clicked(self) -> None:
         self.connect_btn.setEnabled(False)
+        self._set_connection_feedback("Connecting...", level="info")
         try:
-            await self.service.connect()
+            await asyncio.wait_for(self.service.connect(), timeout=CONNECT_TIMEOUT_SEC)
             self._append_log(f"connected to nats: {self.config.nats_url}")
-            self._set_connection_feedback("Connected", ok=True)
+            self._set_connection_state(state="connected")
+            self._set_connection_feedback("Connected", level="ok")
             self._add_notification(
                 level="info",
                 title="Connected",
@@ -2014,12 +2087,14 @@ class MainWindow(QMainWindow):
                 context={"nats_url": self.config.nats_url},
             )
         except Exception as exc:
-            self._append_log(f"connect failed: {exc}")
-            self._set_connection_feedback(f"Connect failed: {exc}", ok=False)
+            detail = self._format_connect_error(exc)
+            self._append_log(f"connect failed: {detail}")
+            self._set_connection_state(state="disconnected", error=detail)
+            self._set_connection_feedback(f"Connect failed: {detail}", level="error")
             self._add_notification(
                 level="warning",
                 title="Connect Failed",
-                message=str(exc),
+                message=detail,
                 category="network",
                 context={"nats_url": self.config.nats_url},
             )
@@ -2029,11 +2104,16 @@ class MainWindow(QMainWindow):
     @asyncSlot()
     async def on_refresh_nodes_clicked(self) -> None:
         self.refresh_btn.setEnabled(False)
+        self._set_connection_feedback("Refreshing nodes...", level="info")
         try:
-            await self._refresh_nodes()
+            await asyncio.wait_for(self.service.connect(), timeout=CONNECT_TIMEOUT_SEC)
+            self._set_connection_state(state="connected")
+            summary = await self._refresh_nodes()
             online = sum(1 for _, snap in self._last_snapshots if snap is not None)
             total = len(self._iter_node_candidates())
             discovered = len(self._discovered_nodes)
+            error_count = int(summary.get("error_count", 0))
+            sample_error = str(summary.get("sample_error", "")).strip()
             if total == 0:
                 self._add_notification(
                     level="warning",
@@ -2042,25 +2122,33 @@ class MainWindow(QMainWindow):
                     category="network",
                     context={"nats_url": self.config.nats_url},
                 )
-                self._set_connection_feedback("No nodes configured/discovered", ok=False)
+                self._set_connection_feedback("No nodes configured/discovered", level="error")
+            elif error_count == total and sample_error:
+                detail = self._format_connect_error(RuntimeError(sample_error))
+                self._set_connection_state(state="disconnected", error=detail)
+                self._set_connection_feedback(f"Refresh failed: {detail}", level="error")
             elif online == 0:
                 self._set_connection_feedback(
                     f"Connected but no online nodes (0/{total}, discovered={discovered})",
-                    ok=False,
+                    level="info",
                 )
             else:
                 self._set_connection_feedback(
                     f"Refresh ok: online={online}/{total}, discovered={discovered}",
-                    ok=True,
+                    level="ok",
                 )
-            self._append_log(f"nodes refreshed: online={online}/{total} lan_discovered={discovered}")
+            self._append_log(
+                f"nodes refreshed: online={online}/{total} lan_discovered={discovered} errors={error_count}"
+            )
         except Exception as exc:
-            self._append_log(f"nodes refresh failed: {exc}")
-            self._set_connection_feedback(f"Refresh failed: {exc}", ok=False)
+            detail = self._format_connect_error(exc)
+            self._append_log(f"nodes refresh failed: {detail}")
+            self._set_connection_state(state="disconnected", error=detail)
+            self._set_connection_feedback(f"Refresh failed: {detail}", level="error")
             self._add_notification(
                 level="warning",
                 title="Nodes Refresh Failed",
-                message=str(exc),
+                message=detail,
                 category="network",
                 context={"nats_url": self.config.nats_url},
             )
@@ -3514,8 +3602,16 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             self.service = DesktopControlService(client_id=self.config.client_id, nats_url=self.config.nats_url)
-            await self.service.connect()
-            self._append_log(f"reconnected nats: {self.config.nats_url}")
+            try:
+                await asyncio.wait_for(self.service.connect(), timeout=CONNECT_TIMEOUT_SEC)
+                self._set_connection_state(state="connected")
+                self._set_connection_feedback("Connected", level="ok")
+                self._append_log(f"reconnected nats: {self.config.nats_url}")
+            except Exception as exc:
+                detail = self._format_connect_error(exc)
+                self._set_connection_state(state="disconnected", error=detail)
+                self._set_connection_feedback(f"Connect failed: {detail}", level="error")
+                self._append_log(f"reconnect failed: {detail}")
         self._load_mcp_services()
         self.settings_status_label.setText("Runtime settings applied.")
 
