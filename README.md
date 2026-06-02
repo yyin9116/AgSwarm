@@ -6,7 +6,7 @@
 
 1. NATS 控制面与数据面（任务 + 文件上传/下载）已跑通。
 2. 节点侧 runtime/daemon/bridge 已支持并发、重试、取消、状态上报。
-3. CLI 与桌面端（PySide6）可发起 Echo/LaTeX 任务并查看结果。
+3. CLI 与 Tauri 桌面客户端可发起/展示多设备任务；旧 PySide6 桌面端仅保留为迁移期兼容面。
 4. Agent skills 配置已接入 runtime（默认/显式/关键词自动触发）。
 5. 节点快照现已暴露 OpenClaw Node 主机层配置，CLI 可通过现有 NATS 控制面向启用 `pi` adapter 的设备节点提交任务。
 
@@ -35,6 +35,31 @@ python scripts/launch_two_desktop_clients.py \
 
 `smoke_two_desktop_clients.py` 会自动拉起本地 NATS，创建两个主桌面客户端和一个后台干扰客户端，验证消息、任务请求、脚本执行、后台任务不抢占当前脚本绑定、中途重启恢复待回传结果、结果回传，并在关闭后重新加载两个主客户端的 conversation state，确认重启后状态仍是 `completed/returned`。
 `launch_two_desktop_clients.py --reset-state` 可用于清空两个可见客户端的 settings、conversation 和 MCP 状态后重新联调。
+
+Tauri 客户端（新前端）：
+
+```bash
+cd desktop
+npm install
+npm run lint
+npm run build
+npm run tauri:dev
+```
+
+默认本地 agent provider：
+
+```bash
+VITE_AGENT_PROVIDER_URL=http://127.0.0.1:15721
+VITE_AGENT_MODEL=gpt-5.5
+VITE_AGENT_API_KEY=local-dev-key
+```
+
+打包：
+
+```bash
+cd desktop
+npm run tauri:build
+```
 
 ## 最短启动路径（本机）
 
