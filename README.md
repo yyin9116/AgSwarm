@@ -8,6 +8,7 @@
 2. 节点侧 runtime/daemon/bridge 已支持并发、重试、取消、状态上报。
 3. CLI 与桌面端（PySide6）可发起 Echo/LaTeX 任务并查看结果。
 4. Agent skills 配置已接入 runtime（默认/显式/关键词自动触发）。
+5. 节点快照现已暴露 OpenClaw Node 主机层配置，CLI 可通过现有 NATS 控制面向启用 `pi` adapter 的设备节点提交任务。
 
 未完成：跨机稳定性回归、下载回传、桌面端通知中心与托盘、签名发布。
 
@@ -20,6 +21,20 @@
 5. 桌面端开发：`docs/desktop-client-dev.md`
 6. 根目录结构：`docs/project-structure.md`
 7. 主线路线图：`docs/mainline-roadmap.md`
+
+本机双桌面客户端联调：
+
+```bash
+export PYTHONPATH=src
+python scripts/smoke_two_desktop_clients.py \
+  --report-path tmp/test-reports/two_desktop_smoke_latest.json
+
+python scripts/launch_two_desktop_clients.py \
+  --state-dir tmp/desktop-clients
+```
+
+`smoke_two_desktop_clients.py` 会自动拉起本地 NATS，创建两个主桌面客户端和一个后台干扰客户端，验证消息、任务请求、脚本执行、后台任务不抢占当前脚本绑定、中途重启恢复待回传结果、结果回传，并在关闭后重新加载两个主客户端的 conversation state，确认重启后状态仍是 `completed/returned`。
+`launch_two_desktop_clients.py --reset-state` 可用于清空两个可见客户端的 settings、conversation 和 MCP 状态后重新联调。
 
 ## 最短启动路径（本机）
 
@@ -48,6 +63,43 @@ python -m workflow_cli node --node-id node-a --nats-url nats://127.0.0.1:4222 --
 $env:PYTHONPATH = "src"
 python -m workflow_cli submit-echo --node-id node-a --nats-url nats://127.0.0.1:4222 --text "hello workflow" --skills safe_default
 ```
+
+Pi agent harness（`earendil-works/pi`）/ OpenClaw 首个集成切片（当前是 OpenClaw 主机/设备发现 + NATS 控制面；独立 OpenClaw 设备协议仍待接入）：
+
+```bash
+PYTHONPATH=src python -m workflow_cli node \
+  --node-id node-pi \
+  --nats-url nats://127.0.0.1:4222 \
+  --enable-pi \
+  --pi-provider anthropic \
+  --pi-model anthropic/claude-sonnet-4 \
+  --openclaw-device-label "Pi edge worker" \
+  --openclaw-device-tags edge,lab \
+  --openclaw-gateway-command "/path/to/openclaw-gateway"
+
+PYTHONPATH=src python -m workflow_cli submit-pi \
+  --device-id node-pi \
+  --prompt "Summarize the uploaded files and propose next actions" \
+  --file-root incoming \
+  --skills safe_default
+```
+
+提交任务前可先检查 OpenClaw 主机通信层：
+
+```bash
+PYTHONPATH=src python -m workflow_cli openclaw-ping --device-id node-pi
+```
+
+也可以向外部 OpenClaw gateway 发送命令：
+
+```bash
+PYTHONPATH=src python -m workflow_cli openclaw-command \
+  --device-id node-pi \
+  device.status \
+  --payload '{"detail": true}'
+```
+
+带 `--device-id` 时，控制端会短暂监听节点状态并解析到具备对应能力的匹配节点；`openclaw-ping` 会向节点的 OpenClaw command subject 发 request/reply 控制消息，`submit-pi` 会解析到具备 `pi-agent` 能力的节点后再提交任务。`--openclaw-gateway-command` 接收 JSON stdin 并输出 JSON stdout，可包装真实 OpenClaw Node CLI/daemon。Pi 运行时密钥应在节点进程环境中配置，不要通过任务参数或命令行转发。可通过 `python -m workflow_cli node-snapshot --node-id node-pi` 查看节点暴露的 `openclaw_node` 通信/能力信息。
 
 Mac->Win 一键回归（在 Mac 侧）：
 

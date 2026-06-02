@@ -81,3 +81,6 @@ class NodeSnapshot:
     skills_source_path: str | None = None
     skills_count: int = 0
     skill_ids: list[str] = field(default_factory=list)
+    capability_summary: list[dict[str, object]] = field(default_factory=list)
+    mcp_services: list[dict[str, object]] = field(default_factory=list)
+    openclaw_node: dict[str, object] = field(default_factory=dict)

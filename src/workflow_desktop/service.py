@@ -2,14 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import shlex
+import tempfile
 from pathlib import Path
 from time import time
+from collections.abc import Awaitable, Callable
 
 from workflow_control_client import WorkflowControlClient
 from workflow_runtime.protocol import AdapterConfig, TaskEnvelope
-from workflow_transport import NatsTransportProvider
+from workflow_transport import NatsTransportProvider, Subscription
 
 logger = logging.getLogger(__name__)
+
+ClientEventHandler = Callable[[str, dict], Awaitable[None]]
 
 
 class DesktopControlService:
@@ -17,8 +23,10 @@ class DesktopControlService:
         self._nats_url = nats_url
         self._transport = NatsTransportProvider(server_url=nats_url)
         self._client = WorkflowControlClient(client_id=client_id, transport=self._transport)
+        self.client_id = client_id
         self._connected = False
         self._lock = asyncio.Lock()
+        self._client_subscriptions: list[Subscription] = []
 
     @property
     def nats_url(self) -> str:
@@ -40,6 +48,7 @@ class DesktopControlService:
         async with self._lock:
             if not self._connected:
                 return
+            await self.stop_client_messaging()
             await self._client.close()
             self._connected = False
             logger.info("desktop service closed")
@@ -47,6 +56,136 @@ class DesktopControlService:
     async def ensure_connected(self) -> None:
         if not self._connected:
             await self.connect()
+
+    async def start_client_messaging(self, *, handler: ClientEventHandler) -> None:
+        await self.ensure_connected()
+        if self._client_subscriptions:
+            return
+
+        async def _presence(subject: str, payload: dict) -> None:
+            await handler(subject, payload)
+
+        async def _inbox(subject: str, payload: dict) -> None:
+            await handler(subject, payload)
+
+        self._client_subscriptions.append(await self._client.subscribe_client_presence(handler=_presence))
+        self._client_subscriptions.append(await self._client.subscribe_client_inbox(handler=_inbox))
+        await self.publish_presence(status="online")
+
+    async def stop_client_messaging(self) -> None:
+        if not self._client_subscriptions:
+            return
+        await self.publish_presence(status="offline")
+        subscriptions = list(self._client_subscriptions)
+        self._client_subscriptions.clear()
+        for sub in subscriptions:
+            try:
+                await sub.unsubscribe()
+            except Exception:
+                logger.exception("desktop client subscription cleanup failed")
+
+    async def publish_presence(self, *, status: str = "online") -> None:
+        await self.ensure_connected()
+        await self._client.publish_client_presence(
+            {
+                "status": status,
+                "display_name": self.client_id,
+            }
+        )
+
+    async def send_chat_message(
+        self,
+        *,
+        target_client_id: str,
+        text: str,
+        conversation_id: str | None = None,
+    ) -> dict:
+        await self.ensure_connected()
+        return await self._client.send_client_message(
+            target_client_id=target_client_id,
+            message_type="chat.message",
+            conversation_id=conversation_id,
+            payload={"text": text},
+        )
+
+    async def send_task_request(
+        self,
+        *,
+        target_client_id: str,
+        instruction: str,
+        suggested_script: str = "",
+        conversation_id: str | None = None,
+    ) -> dict:
+        await self.ensure_connected()
+        return await self._client.send_client_message(
+            target_client_id=target_client_id,
+            message_type="task.request",
+            conversation_id=conversation_id,
+            payload={
+                "instruction": instruction,
+                "suggested_script": suggested_script,
+            },
+        )
+
+    async def send_task_result(
+        self,
+        *,
+        target_client_id: str,
+        request_message_id: str,
+        result: dict,
+        conversation_id: str | None = None,
+    ) -> dict:
+        await self.ensure_connected()
+        return await self._client.send_client_message(
+            target_client_id=target_client_id,
+            message_type="task.result",
+            conversation_id=conversation_id,
+            payload={
+                "request_message_id": request_message_id,
+                "result": result,
+            },
+        )
+
+    async def execute_python_script(self, *, script: str, timeout_sec: float = 30.0) -> dict:
+        text = script.strip()
+        if not text:
+            raise ValueError("script is required")
+        tmp_dir = Path(tempfile.mkdtemp(prefix="workflow-client-task-"))
+        script_path = tmp_dir / "task.py"
+        script_path.write_text(text + "\n", encoding="utf-8")
+        cmd = [os.environ.get("PYTHON", "python3"), str(script_path)]
+        started_at = time()
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(tmp_dir),
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
+        except asyncio.TimeoutError:
+            proc.kill()
+            stdout, stderr = await proc.communicate()
+            return {
+                "ok": False,
+                "returncode": proc.returncode,
+                "timeout": True,
+                "command": shlex.join(cmd),
+                "cwd": str(tmp_dir),
+                "stdout": stdout.decode("utf-8", errors="replace"),
+                "stderr": stderr.decode("utf-8", errors="replace"),
+                "duration_sec": round(time() - started_at, 3),
+            }
+        return {
+            "ok": proc.returncode == 0,
+            "returncode": proc.returncode,
+            "timeout": False,
+            "command": shlex.join(cmd),
+            "cwd": str(tmp_dir),
+            "stdout": stdout.decode("utf-8", errors="replace"),
+            "stderr": stderr.decode("utf-8", errors="replace"),
+            "duration_sec": round(time() - started_at, 3),
+        }
 
     async def request_node_snapshot(self, *, node_id: str, timeout_sec: float = 2.0) -> dict:
         await self.ensure_connected()

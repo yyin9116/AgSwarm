@@ -6,7 +6,12 @@ import sys
 from pathlib import Path
 
 from workflow_desktop import run_desktop_app
-from workflow_desktop.models import DesktopConfig, default_mcp_config_path, default_settings_path
+from workflow_desktop.models import (
+    DesktopConfig,
+    default_conversation_state_path,
+    default_mcp_config_path,
+    default_settings_path,
+)
 from workflow_discovery import DISCOVERY_PORT_DEFAULT
 from workflow_logging import setup_logging
 
@@ -27,6 +32,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--nats-url", default=os.getenv("WORKFLOW_NATS_URL", "nats://127.0.0.1:4222"))
     parser.add_argument("--client-id", default=os.getenv("WORKFLOW_DESKTOP_CLIENT_ID", "desktop-client"))
     parser.add_argument("--language", default=os.getenv("WORKFLOW_DESKTOP_LANGUAGE", "en-US"))
+    parser.add_argument("--display-name", default=os.getenv("WORKFLOW_DESKTOP_DISPLAY_NAME", ""))
     parser.add_argument(
         "--nodes",
         default=os.getenv("WORKFLOW_DESKTOP_NODE_CANDIDATES", "node-a,node-win,node-smoke"),
@@ -86,6 +92,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path for desktop settings json.",
     )
     parser.add_argument(
+        "--conversation-state-path",
+        default=os.getenv("WORKFLOW_DESKTOP_CONVERSATION_STATE_PATH"),
+        help="Path for persisted peer and conversation state json.",
+    )
+    parser.add_argument(
         "--log-level",
         default=os.getenv("WORKFLOW_LOG_LEVEL", "INFO"),
         help="Log level: DEBUG/INFO/WARN/ERROR",
@@ -106,6 +117,7 @@ def main() -> int:
         nats_url=args.nats_url,
         client_id=args.client_id,
         language=str(args.language or "en-US"),
+        display_name=args.display_name,
         node_candidates=[x.strip() for x in str(args.nodes).split(",") if x.strip()],
         poll_interval_sec=max(0.5, args.poll_interval_sec),
         discovery_enabled=not bool(args.disable_discovery),
@@ -117,6 +129,7 @@ def main() -> int:
         config_sync_conflict_policy=str(args.config_sync_conflict_policy or "desktop_wins"),
         mcp_config_path=args.mcp_config_path or default_mcp_config_path(),
         settings_path=args.settings_path or default_settings_path(),
+        conversation_state_path=args.conversation_state_path or default_conversation_state_path(args.client_id),
     )
     try:
         return run_desktop_app(config)

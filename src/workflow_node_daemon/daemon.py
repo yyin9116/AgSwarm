@@ -11,6 +11,7 @@ from workflow_node_daemon.models import (
     TaskStatus,
     utc_now_iso,
 )
+from workflow_node_daemon.openclaw import OpenClawNodeConfig
 from workflow_runtime.protocol import Event, TaskEnvelope
 from workflow_runtime.runtime import InMemoryEventSink, Runtime
 
@@ -24,6 +25,7 @@ class WorkflowNodeDaemon:
         *,
         max_concurrency: int = 1,
         default_retries: int = 0,
+        openclaw_config: OpenClawNodeConfig | None = None,
     ) -> None:
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be >= 1")
@@ -33,6 +35,7 @@ class WorkflowNodeDaemon:
         self.runtime = runtime
         self.max_concurrency = max_concurrency
         self.default_retries = default_retries
+        self.openclaw_config = openclaw_config or OpenClawNodeConfig()
         self.records: dict[str, TaskRecord] = {}
         self._queue: asyncio.Queue[str | None] = asyncio.Queue()
         self._workers: list[asyncio.Task[None]] = []
@@ -123,6 +126,8 @@ class WorkflowNodeDaemon:
         if not isinstance(skills_source, str):
             skills_source = None
         skill_ids = [str(x) for x in skill_info.get("skill_ids", [])] if isinstance(skill_info.get("skill_ids"), list) else []
+        capability_summary = self.runtime.capability_summary()
+        mcp_services = self.runtime.mcp_services()
         return NodeSnapshot(
             status=self._node_status(),
             max_concurrency=self.max_concurrency,
@@ -136,6 +141,9 @@ class WorkflowNodeDaemon:
             skills_source_path=skills_source,
             skills_count=int(skill_info.get("skill_count", 0) or 0),
             skill_ids=skill_ids,
+            capability_summary=capability_summary,
+            mcp_services=mcp_services,
+            openclaw_node=self.openclaw_config.describe(adapters=adapters),
         )
 
     def get_task_events(self, task_id: str) -> list[dict]:

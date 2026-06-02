@@ -43,10 +43,11 @@ from PySide6.QtWidgets import (
 )
 from qasync import asyncSlot
 
+from workflow_desktop.conversation_store import load_conversation_state, save_conversation_state
 from workflow_desktop.mcp_store import load_mcp_services, save_mcp_services
 from workflow_desktop.i18n import LANGUAGE_LABELS, SUPPORTED_LANGS, normalize_language, translate_text
 from workflow_desktop.config_sync import CONFLICT_POLICY_OPTIONS, decide_sync_action
-from workflow_desktop.models import DesktopConfig, McpServiceConfig
+from workflow_desktop.models import DesktopConfig, McpServiceConfig, default_conversation_state_path
 from workflow_desktop.service import DesktopControlService
 from workflow_desktop.settings_store import load_settings, save_settings
 from workflow_desktop.updater import UpdateInfo, check_for_update, current_app_version
@@ -119,6 +120,20 @@ class MainWindow(QMainWindow):
         self._history_filter = ""
         self._mcp_services: list[McpServiceConfig] = []
         self._last_snapshots: list[tuple[str, dict | None]] = []
+        self._client_peers: dict[str, dict[str, Any]] = {}
+        self._conversation_messages: list[dict[str, Any]] = []
+        self._conversation_message_ids: set[str] = set()
+        self._peer_read_cursors: dict[str, str] = {}
+        self._syncing_peer_selection = False
+        self._selected_peer_id = ""
+        self._latest_task_request: dict[str, Any] | None = None
+        self._active_task_request: dict[str, Any] | None = None
+        self._task_request_records: dict[str, str] = {}
+        self._inbound_task_request_records: dict[str, str] = {}
+        self._last_script_result: dict[str, Any] | None = None
+        self._last_script_result_request_id = ""
+        self._script_loaded_request_id = ""
+        self._script_loaded_text = ""
         self._syncing_artifact_selection = False
         self._notification_max_items = MAX_NOTIFICATIONS
         self._notification_dedupe_window_sec = NOTIFICATION_DEDUPE_WINDOW_SEC
@@ -137,6 +152,9 @@ class MainWindow(QMainWindow):
         self._tray_enabled = False
         self._tray_force_close = False
         self._tray_hide_hint_shown = False
+        if not self.config.conversation_state_path:
+            self.config.conversation_state_path = default_conversation_state_path(self.config.client_id)
+        self._display_name = self.config.display_name.strip() or self.config.client_id
         self._discovery_enabled = bool(config.discovery_enabled)
         self._discovery_port = max(1, int(config.discovery_port or DISCOVERY_PORT_DEFAULT))
         self._discovery_max_age_sec = max(2.0, float(config.discovery_max_age_sec or DISCOVERY_MAX_AGE_SEC_DEFAULT))
@@ -155,7 +173,7 @@ class MainWindow(QMainWindow):
         self._connection_state = "disconnected"
         self._last_connection_error = ""
 
-        self.setWindowTitle("AgSwarm")
+        self.setWindowTitle(f"AgSwarm - {self._display_name}")
         self.resize(1460, 900)
         self.setMinimumSize(1180, 760)
 
@@ -165,13 +183,14 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(12, 12, 12, 12)
         outer.setSpacing(8)
 
-        self.title_label = QLabel("Workflow Controller Prototype (Desktop)")
+        self.title_label = QLabel(f"Workflow Desktop | {self._display_name}")
         self.subtitle_label = QLabel("LAN task dispatch, MCP execution, artifact return and live telemetry")
         outer.addWidget(self.title_label)
         outer.addWidget(self.subtitle_label)
         outer.addWidget(self._build_top_status_bar())
         self.tabs = QTabWidget()
         outer.addWidget(self.tabs, 1)
+        self.tabs.addTab(self._build_conversation_tab(), "Conversations")
         self.tabs.addTab(self._build_task_center_tab(), "Task Center")
         self.tabs.addTab(self._build_task_detail_tab(), "Task Detail")
         self.tabs.addTab(self._build_results_tab(), "Results")
@@ -182,6 +201,7 @@ class MainWindow(QMainWindow):
         self._apply_prototype_styles()
 
         self._refresh_header()
+        self._load_conversation_state()
         self._load_settings_into_ui()
         if self.service.nats_url != self.config.nats_url:
             self.service = DesktopControlService(client_id=self.config.client_id, nats_url=self.config.nats_url)
@@ -240,6 +260,85 @@ class MainWindow(QMainWindow):
         row.addWidget(self.status_left_label, 1)
         row.addWidget(self.status_right_label)
         return bar
+
+    def _build_conversation_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        split = QSplitter(Qt.Horizontal)
+        layout.addWidget(split, 1)
+
+        peers_box = QGroupBox("Client Peers")
+        peers_layout = QVBoxLayout(peers_box)
+        self.peer_input = QLineEdit()
+        self.peer_input.setPlaceholderText("target client id, e.g. desktop-b")
+        peers_layout.addWidget(self.peer_input)
+        peer_row = QHBoxLayout()
+        add_peer = QPushButton("Add Peer")
+        add_peer.clicked.connect(self.on_add_peer_clicked)
+        peer_row.addWidget(add_peer)
+        announce = QPushButton("Announce")
+        announce.clicked.connect(self.on_announce_presence_clicked)
+        peer_row.addWidget(announce)
+        peers_layout.addLayout(peer_row)
+        self.peers_list = QListWidget()
+        self.peers_list.itemSelectionChanged.connect(self.on_peer_selection_changed)
+        peers_layout.addWidget(self.peers_list, 1)
+        split.addWidget(peers_box)
+
+        conversation_box = QGroupBox("Conversation")
+        conversation_layout = QVBoxLayout(conversation_box)
+        self.conversation_title = QLabel("Select or add a peer.")
+        self.conversation_title.setObjectName("queueTitle")
+        conversation_layout.addWidget(self.conversation_title)
+        self.conversation_summary_label = QLabel("No conversation selected.")
+        self.conversation_summary_label.setWordWrap(True)
+        conversation_layout.addWidget(self.conversation_summary_label)
+        self.conversation_list = QListWidget()
+        self.conversation_list.itemSelectionChanged.connect(self.on_conversation_selection_changed)
+        conversation_layout.addWidget(self.conversation_list, 1)
+        self.chat_input = QPlainTextEdit()
+        self.chat_input.setPlaceholderText("message or task request")
+        self.chat_input.setFixedHeight(90)
+        conversation_layout.addWidget(self.chat_input)
+        action_row = QHBoxLayout()
+        send_message = QPushButton("Send Message")
+        send_message.clicked.connect(self.on_send_chat_clicked)
+        action_row.addWidget(send_message)
+        send_task = QPushButton("Request Task")
+        send_task.setObjectName("dispatchPrimary")
+        send_task.clicked.connect(self.on_send_task_request_clicked)
+        action_row.addWidget(send_task)
+        load_task = QPushButton("Use Latest Request")
+        load_task.clicked.connect(self.on_use_latest_task_request_clicked)
+        action_row.addWidget(load_task)
+        action_row.addStretch(1)
+        conversation_layout.addLayout(action_row)
+        split.addWidget(conversation_box)
+
+        task_box = QGroupBox("Local Script Runner")
+        task_layout = QVBoxLayout(task_box)
+        self.script_request_label = QLabel("No task request selected.")
+        self.script_request_label.setWordWrap(True)
+        task_layout.addWidget(self.script_request_label)
+        self.script_editor = QPlainTextEdit()
+        self.script_editor.setPlaceholderText("write Python script for the selected request")
+        task_layout.addWidget(self.script_editor, 2)
+        script_row = QHBoxLayout()
+        run_script = QPushButton("Run Script")
+        run_script.setObjectName("dispatchPrimary")
+        run_script.clicked.connect(self.on_run_local_script_clicked)
+        script_row.addWidget(run_script)
+        send_result = QPushButton("Send Last Result")
+        send_result.clicked.connect(self.on_send_last_script_result_clicked)
+        script_row.addWidget(send_result)
+        script_row.addStretch(1)
+        task_layout.addLayout(script_row)
+        self.script_result_text = QPlainTextEdit()
+        self.script_result_text.setReadOnly(True)
+        task_layout.addWidget(self.script_result_text, 1)
+        split.addWidget(task_box)
+        split.setSizes([320, 760, 560])
+        return page
 
     def _build_task_center_tab(self) -> QWidget:
         page = QWidget()
@@ -914,6 +1013,8 @@ class MainWindow(QMainWindow):
         try:
             await asyncio.wait_for(self.service.connect(), timeout=CONNECT_TIMEOUT_SEC)
             self._append_log(f"desktop connected nats={self.config.nats_url}")
+            await self.service.start_client_messaging(handler=self._handle_client_event)
+            self._append_log(f"client messaging ready id={self.config.client_id}")
             self._set_connection_state(state="connected")
             self._set_connection_feedback("Connected", level="ok")
         except Exception as exc:
@@ -935,6 +1036,7 @@ class MainWindow(QMainWindow):
 
     async def shutdown(self) -> None:
         self._running = False
+        self._save_conversation_state()
         if self._poll_task is not None:
             self._poll_task.cancel()
             await asyncio.gather(self._poll_task, return_exceptions=True)
@@ -1150,6 +1252,548 @@ class MainWindow(QMainWindow):
                 )
                 continue
             await self._sync_node_config_once(node_id=node_id, payload=payload, digest=digest, now=now, force=False)
+
+    def _conversation_state_payload(self) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "client_id": self.config.client_id,
+            "selected_peer_id": self._selected_peer_id,
+            "client_peers": self._client_peers,
+            "conversation_messages": self._conversation_messages[-500:],
+            "peer_read_cursors": self._peer_read_cursors,
+            "task_request_records": self._task_request_records,
+            "inbound_task_request_records": self._inbound_task_request_records,
+            "task_records": self._task_records,
+            "task_order": self._task_order[-500:],
+            "task_index": self._task_index,
+            "latest_task_request_id": (
+                str(self._latest_task_request.get("message_id", "")).strip()
+                if isinstance(self._latest_task_request, dict)
+                else ""
+            ),
+            "active_task_request_id": (
+                str(self._active_task_request.get("message_id", "")).strip()
+                if isinstance(self._active_task_request, dict)
+                else ""
+            ),
+        }
+
+    def _load_conversation_state(self) -> None:
+        payload = load_conversation_state(self.config.conversation_state_path)
+        if not payload:
+            return
+        peers = payload.get("client_peers")
+        if isinstance(peers, dict):
+            self._client_peers = {str(k): v for k, v in peers.items() if isinstance(v, dict)}
+        messages = payload.get("conversation_messages")
+        if isinstance(messages, list):
+            self._conversation_messages = [dict(x) for x in messages if isinstance(x, dict)]
+            self._conversation_message_ids = {
+                str(x.get("message_id", "")).strip()
+                for x in self._conversation_messages
+                if str(x.get("message_id", "")).strip()
+            }
+        read_cursors = payload.get("peer_read_cursors")
+        if isinstance(read_cursors, dict):
+            self._peer_read_cursors = {
+                str(k): str(v)
+                for k, v in read_cursors.items()
+                if str(k).strip() and str(v).strip()
+            }
+        selected = str(payload.get("selected_peer_id", "")).strip()
+        if selected:
+            self._selected_peer_id = selected
+            self.peer_input.setText(selected)
+        task_records = payload.get("task_records")
+        if isinstance(task_records, dict):
+            self._task_records = {str(k): v for k, v in task_records.items() if isinstance(v, dict)}
+        task_order = payload.get("task_order")
+        if isinstance(task_order, list):
+            self._task_order = [
+                str(record_id)
+                for record_id in task_order
+                if str(record_id) in self._task_records
+            ]
+        else:
+            self._task_order = list(self._task_records)
+        task_index = payload.get("task_index")
+        if isinstance(task_index, int) and task_index > self._task_index:
+            self._task_index = task_index
+        self._restore_task_records_to_ui()
+        task_records = payload.get("task_request_records")
+        if isinstance(task_records, dict):
+            self._task_request_records = {
+                str(k): str(v)
+                for k, v in task_records.items()
+                if str(v) in self._task_records
+            }
+        inbound_records = payload.get("inbound_task_request_records")
+        if isinstance(inbound_records, dict):
+            self._inbound_task_request_records = {
+                str(k): str(v)
+                for k, v in inbound_records.items()
+                if str(v) in self._task_records
+            }
+        latest_id = str(payload.get("latest_task_request_id", "")).strip()
+        if latest_id:
+            for message in reversed(self._conversation_messages):
+                if str(message.get("message_id", "")).strip() == latest_id:
+                    self._latest_task_request = message
+                    break
+        active_id = str(payload.get("active_task_request_id", "")).strip()
+        if active_id:
+            for message in reversed(self._conversation_messages):
+                if str(message.get("message_id", "")).strip() == active_id:
+                    self._active_task_request = message
+                    break
+        if self._active_task_request is None and self._latest_task_request is not None:
+            self._active_task_request = self._latest_task_request
+        self._refresh_peer_list()
+        self._refresh_conversation_view()
+
+    def _restore_task_records_to_ui(self) -> None:
+        self.tasks_list.clear()
+        for record_id in self._task_order:
+            record = self._task_records.get(record_id)
+            if not record:
+                continue
+            kind = record.get("kind")
+            node_id = record.get("node_id")
+            status = record.get("status")
+            item = QListWidgetItem(f"{kind} | node={node_id} | status={status} | id={record_id}")
+            item.setData(Qt.UserRole, record_id)
+            self.tasks_list.addItem(item)
+        self._refresh_queue_cards()
+        self.refresh_history_table()
+
+    def _save_conversation_state(self) -> None:
+        try:
+            save_conversation_state(self.config.conversation_state_path, self._conversation_state_payload())
+        except Exception as exc:
+            logger.warning("save conversation state failed: %s", exc)
+
+    async def _handle_client_event(self, subject: str, payload: dict) -> None:
+        msg_type = str(payload.get("type", "")).strip()
+        if msg_type == "presence":
+            self._handle_client_presence(payload)
+            return
+        self._handle_client_inbox_message(payload)
+
+    def _handle_client_presence(self, payload: dict[str, Any]) -> None:
+        peer_id = str(payload.get("client_id") or payload.get("from_client_id") or "").strip()
+        if not peer_id or peer_id == self.config.client_id:
+            return
+        self._upsert_client_peer(
+            peer_id,
+            status=str(payload.get("status", "online")),
+            last_seen=str(payload.get("ts", datetime.now().isoformat(timespec="seconds"))),
+            payload=payload,
+        )
+        self._refresh_peer_list()
+        self._save_conversation_state()
+
+    def _upsert_client_peer(
+        self,
+        peer_id: str,
+        *,
+        status: str,
+        last_seen: str,
+        payload: dict[str, Any],
+    ) -> None:
+        peer = self._client_peers.setdefault(
+            peer_id,
+            {
+                "client_id": peer_id,
+                "status": "manual",
+                "last_seen": "-",
+                "payload": {},
+            },
+        )
+        peer["client_id"] = peer_id
+        peer["status"] = status or str(peer.get("status", "online"))
+        peer["last_seen"] = last_seen or str(peer.get("last_seen", "-"))
+        peer["payload"] = payload
+
+    def _handle_client_inbox_message(self, payload: dict[str, Any]) -> None:
+        sender = str(payload.get("from_client_id", "")).strip()
+        if sender and sender != self.config.client_id:
+            self._upsert_client_peer(
+                sender,
+                status="online",
+                last_seen=str(payload.get("ts", datetime.now().isoformat(timespec="seconds"))),
+                payload=payload,
+            )
+        was_added = self._append_conversation_message(direction="in", message=payload)
+        if not was_added:
+            return
+        if sender and sender == self._selected_peer_id.strip():
+            self._mark_peer_read(sender)
+        msg_type = str(payload.get("type"))
+        if msg_type == "task.request":
+            self._latest_task_request = payload
+            if self._should_auto_load_task_request(payload):
+                self._load_task_request(payload, overwrite_script=self._can_replace_script_from_request())
+            self._register_inbound_task_request(payload)
+            request_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+            instruction = str(request_payload.get("instruction", "")).strip()
+            self._add_notification(
+                level="info",
+                title=f"Task Request | {sender or 'unknown'}",
+                message=instruction or "Task request received.",
+                category="conversation",
+                context=payload,
+            )
+        elif msg_type == "task.result":
+            self._handle_task_result_message(payload)
+        if sender:
+            self._refresh_peer_list()
+            self._refresh_conversation_view()
+            self._save_conversation_state()
+
+    def _register_inbound_task_request(self, message: dict[str, Any]) -> None:
+        message_id = str(message.get("message_id", "")).strip()
+        if not message_id or message_id in self._inbound_task_request_records:
+            return
+        payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
+        instruction = str(payload.get("instruction", "")).strip()
+        sender = str(message.get("from_client_id", "unknown")).strip() or "unknown"
+        record_id = self._register_task_record(
+            kind="client-task-inbox",
+            node_id=sender,
+            result={"status": "received", "ok": True, "message": message},
+            request={
+                "instruction": instruction,
+                "source_message_id": message_id,
+                "source_client_id": sender,
+            },
+        )
+        self._inbound_task_request_records[message_id] = record_id
+        self._save_conversation_state()
+
+    def _load_task_request(self, message: dict[str, Any], *, overwrite_script: bool = True) -> None:
+        payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
+        instruction = str(payload.get("instruction", "")).strip()
+        suggested_script = str(payload.get("suggested_script", "")).strip()
+        message_id = str(message.get("message_id", "")).strip()
+        self._latest_task_request = message
+        self._active_task_request = message
+        self.script_request_label.setText(
+            f"Task request from {message.get('from_client_id', 'unknown')}\n"
+            f"Message: {message.get('message_id')}\n"
+            f"{instruction or 'No instruction text.'}"
+        )
+        if message_id != self._last_script_result_request_id:
+            self._last_script_result = None
+            self._last_script_result_request_id = ""
+            self.script_result_text.clear()
+            self._restore_script_result_for_request(message)
+        if suggested_script and overwrite_script:
+            self.script_editor.setPlainText(suggested_script)
+            self._script_loaded_request_id = message_id
+            self._script_loaded_text = suggested_script
+        elif overwrite_script and not suggested_script:
+            fallback = (
+                "print('received task')\n"
+                f"print({instruction!r})\n"
+            )
+            self.script_editor.setPlainText(fallback)
+            self._script_loaded_request_id = message_id
+            self._script_loaded_text = fallback
+
+    def _restore_script_result_for_request(self, message: dict[str, Any]) -> bool:
+        message_id = str(message.get("message_id", "")).strip()
+        record_id = self._inbound_task_request_records.get(message_id, "")
+        record = self._task_records.get(record_id)
+        if not record:
+            return False
+        status = str(record.get("status", "")).strip()
+        if status not in {"ready-to-return", "script-failed", "returned"}:
+            return False
+        result = record.get("result") if isinstance(record.get("result"), dict) else {}
+        script_result = result.get("script_result") if isinstance(result.get("script_result"), dict) else {}
+        if not script_result:
+            return False
+        self._last_script_result = script_result
+        self._last_script_result_request_id = message_id
+        self.script_result_text.setPlainText(
+            json.dumps(
+                self._script_result_display_payload(request=message, result=script_result),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return True
+
+    def _can_replace_script_from_request(self) -> bool:
+        current = self.script_editor.toPlainText()
+        return (not current.strip()) or bool(self._script_loaded_request_id and current == self._script_loaded_text)
+
+    def _should_auto_load_task_request(self, message: dict[str, Any]) -> bool:
+        sender = str(message.get("from_client_id", "")).strip()
+        return (not self._selected_peer_id.strip()) or sender == self._selected_peer_id.strip()
+
+    def _latest_task_request_for_peer(self, peer_id: str) -> dict[str, Any] | None:
+        peer = peer_id.strip()
+        for message in reversed(self._conversation_messages):
+            if str(message.get("type", "")).strip() != "task.request":
+                continue
+            if str(message.get("target_client_id", "")).strip() != self.config.client_id:
+                continue
+            if peer and str(message.get("from_client_id", "")).strip() != peer:
+                continue
+            return message
+        return None
+
+    def _load_latest_task_request_for_peer(self, peer_id: str, *, overwrite_script: bool) -> bool:
+        request = self._latest_task_request_for_peer(peer_id)
+        if not request:
+            return False
+        self._load_task_request(request, overwrite_script=overwrite_script)
+        return True
+
+    def _script_result_display_payload(self, *, request: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "request_message_id": str(request.get("message_id", "")).strip(),
+            "request_from_client_id": str(request.get("from_client_id", "")).strip(),
+            "result": result,
+        }
+
+    def _refresh_peer_list(self) -> None:
+        selected = self._selected_peer_id
+        self._syncing_peer_selection = True
+        self.peers_list.clear()
+        try:
+            for peer_id in sorted(self._client_peers):
+                peer = self._client_peers[peer_id]
+                stats = self._peer_conversation_stats(peer_id)
+                item = QListWidgetItem(
+                    f"{peer_id}\n"
+                    f"Status: {peer.get('status', 'unknown')}\n"
+                    f"Last seen: {peer.get('last_seen', '-')}\n"
+                    f"Messages: {stats['messages']} | Unread: {stats['unread']} | Open: in={stats['open_inbound']} out={stats['open_outbound']}"
+                )
+                item.setData(Qt.UserRole, peer_id)
+                item.setSizeHint(QSize(300, 94))
+                self.peers_list.addItem(item)
+                if peer_id == selected:
+                    self.peers_list.setCurrentItem(item)
+            if self.peers_list.currentItem() is None and self.peers_list.count() > 0:
+                self.peers_list.setCurrentRow(0)
+                item = self.peers_list.currentItem()
+                peer_id = item.data(Qt.UserRole) if item is not None else None
+                if isinstance(peer_id, str):
+                    self._selected_peer_id = peer_id
+                    self.peer_input.setText(peer_id)
+        finally:
+            self._syncing_peer_selection = False
+
+    def _conversation_id(self, peer_id: str) -> str:
+        pair = sorted([self.config.client_id, peer_id.strip()])
+        return ":".join(pair)
+
+    def _append_conversation_message(self, *, direction: str, message: dict[str, Any]) -> bool:
+        message_id = str(message.get("message_id", "")).strip()
+        if message_id and message_id in self._conversation_message_ids:
+            return False
+        row = dict(message)
+        row["direction"] = direction
+        self._conversation_messages.append(row)
+        if message_id:
+            self._conversation_message_ids.add(message_id)
+        self._refresh_conversation_view()
+        self._save_conversation_state()
+        return True
+
+    def _messages_for_peer(self, peer_id: str) -> list[dict[str, Any]]:
+        peer = peer_id.strip()
+        if not peer:
+            return list(self._conversation_messages)
+        rows: list[dict[str, Any]] = []
+        for message in self._conversation_messages:
+            sender = str(message.get("from_client_id", "")).strip()
+            target = str(message.get("target_client_id", "")).strip()
+            if peer in {sender, target}:
+                rows.append(message)
+        return rows
+
+    def _message_peer_id(self, message: dict[str, Any]) -> str:
+        sender = str(message.get("from_client_id", "")).strip()
+        target = str(message.get("target_client_id", "")).strip()
+        if sender and sender != self.config.client_id:
+            return sender
+        if target and target != self.config.client_id:
+            return target
+        return sender or target
+
+    def _unread_count_for_peer(self, peer_id: str) -> int:
+        cursor = self._peer_read_cursors.get(peer_id, "")
+        seen_cursor = not cursor
+        unread = 0
+        for message in self._messages_for_peer(peer_id):
+            message_id = str(message.get("message_id", "")).strip()
+            if message_id and message_id == cursor:
+                seen_cursor = True
+                continue
+            if not seen_cursor:
+                continue
+            direction = str(message.get("direction", "")).strip()
+            if direction == "in":
+                unread += 1
+        return unread
+
+    def _mark_peer_read(self, peer_id: str) -> bool:
+        messages = self._messages_for_peer(peer_id)
+        for message in reversed(messages):
+            message_id = str(message.get("message_id", "")).strip()
+            if message_id:
+                if self._peer_read_cursors.get(peer_id) == message_id:
+                    return False
+                self._peer_read_cursors[peer_id] = message_id
+                return True
+        return False
+
+    def _task_status_for_request_message(self, message: dict[str, Any]) -> str:
+        msg_type = str(message.get("type", "")).strip()
+        if msg_type != "task.request":
+            return ""
+        message_id = str(message.get("message_id", "")).strip()
+        if not message_id:
+            return ""
+        target = str(message.get("target_client_id", "")).strip()
+        if target == self.config.client_id:
+            record_id = self._inbound_task_request_records.get(message_id)
+        else:
+            record_id = self._task_request_records.get(message_id)
+        record = self._task_records.get(record_id or "")
+        return str(record.get("status", "")).strip() if record else ""
+
+    def _peer_conversation_stats(self, peer_id: str) -> dict[str, int | str]:
+        messages = self._messages_for_peer(peer_id)
+        open_inbound = 0
+        open_outbound = 0
+        for message in messages:
+            if str(message.get("type", "")).strip() != "task.request":
+                continue
+            status = self._task_status_for_request_message(message)
+            if str(message.get("target_client_id", "")).strip() == self.config.client_id:
+                if status and status != "returned":
+                    open_inbound += 1
+            elif str(message.get("from_client_id", "")).strip() == self.config.client_id:
+                if status and status not in {"completed", "failed"}:
+                    open_outbound += 1
+        if peer_id:
+            unread = self._unread_count_for_peer(peer_id)
+        else:
+            unread = 0
+            peer_ids = {self._message_peer_id(message) for message in messages}
+            for message_peer_id in peer_ids:
+                if message_peer_id:
+                    unread += self._unread_count_for_peer(message_peer_id)
+        last_ts = str(messages[-1].get("ts", "")) if messages else ""
+        return {
+            "messages": len(messages),
+            "unread": unread,
+            "open_inbound": open_inbound,
+            "open_outbound": open_outbound,
+            "last_ts": last_ts,
+        }
+
+    def _handle_task_result_message(self, message: dict[str, Any]) -> None:
+        payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
+        request_message_id = str(payload.get("request_message_id", "")).strip()
+        result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+        record_id = self._task_request_records.get(request_message_id)
+        if record_id and record_id in self._task_records:
+            record = self._task_records[record_id]
+            ok = bool(result.get("ok", False))
+            record["status"] = "completed" if ok else "failed"
+            record["result"] = {
+                "status": record["status"],
+                "ok": ok,
+                "message": message,
+                "script_result": result,
+            }
+            record["artifacts"] = self._extract_artifacts(record["result"])
+            record["timeline"].append(
+                {
+                    "ts": str(message.get("ts", datetime.now().isoformat(timespec="seconds"))),
+                    "stage": "task.result",
+                    "message": f"result ok={ok} returncode={result.get('returncode')}",
+                }
+            )
+            self._refresh_task_item(record_id)
+            self._refresh_queue_cards()
+            self.refresh_history_table()
+            self._refresh_task_detail_and_results()
+            self._refresh_conversation_state_views()
+            self._save_conversation_state()
+        self._add_notification(
+            level="info" if result.get("ok", False) else "warning",
+            title=f"Task Result | {message.get('from_client_id', 'unknown')}",
+            message=f"request={request_message_id or '-'} ok={result.get('ok')}",
+            category="conversation",
+            context=message,
+        )
+
+    def _refresh_task_item(self, record_id: str) -> None:
+        record = self._task_records.get(record_id)
+        if not record:
+            return
+        text = f"{record.get('kind')} | node={record.get('node_id')} | status={record.get('status')} | id={record_id}"
+        for i in range(self.tasks_list.count()):
+            item = self.tasks_list.item(i)
+            if item is not None and item.data(Qt.UserRole) == record_id:
+                item.setText(text)
+                return
+
+    def _refresh_conversation_state_views(self) -> None:
+        self._refresh_peer_list()
+        self._refresh_conversation_view()
+
+    def _refresh_conversation_view(self) -> None:
+        peer_id = self._selected_peer_id.strip()
+        stats = self._peer_conversation_stats(peer_id) if peer_id else {
+            **self._peer_conversation_stats(""),
+        }
+        self.conversation_title.setText(
+            f"Conversation with {peer_id}" if peer_id else "Select or add a peer."
+        )
+        if peer_id:
+            last_seen = stats.get("last_ts") or self._client_peers.get(peer_id, {}).get("last_seen", "-")
+            self.conversation_summary_label.setText(
+                f"Messages: {stats['messages']} | Unread: {stats['unread']} | Open inbound: {stats['open_inbound']} | "
+                f"Open outbound: {stats['open_outbound']} | Last activity: {last_seen or '-'}"
+            )
+        else:
+            self.conversation_summary_label.setText(
+                f"All stored messages: {stats['messages']} | Unread: {stats['unread']} | "
+                f"Open inbound: {stats['open_inbound']} | Open outbound: {stats['open_outbound']}. "
+                "Select a peer to scope the conversation."
+            )
+        self.conversation_list.clear()
+        for message in self._messages_for_peer(peer_id):
+            sender = str(message.get("from_client_id", "")).strip()
+            target = str(message.get("target_client_id", "")).strip()
+            msg_type = str(message.get("type", "message"))
+            direction = str(message.get("direction", "out"))
+            payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
+            if msg_type == "chat.message":
+                body = str(payload.get("text", ""))
+            elif msg_type == "task.request":
+                status = self._task_status_for_request_message(message) or "untracked"
+                body = f"TASK REQUEST [{status}]: " + str(payload.get("instruction", ""))
+            elif msg_type == "task.result":
+                result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+                body = f"TASK RESULT: ok={result.get('ok')} returncode={result.get('returncode')}"
+            else:
+                body = json.dumps(payload, ensure_ascii=False)
+            prefix = "IN" if direction == "in" else "OUT"
+            item = QListWidgetItem(f"[{prefix}] {msg_type} | {message.get('ts', '')}\n{body}")
+            item.setData(Qt.UserRole, message.get("message_id"))
+            item.setData(Qt.UserRole + 1, message)
+            self.conversation_list.addItem(item)
+        if self.conversation_list.count() > 0:
+            self.conversation_list.scrollToBottom()
 
     def _append_log(self, text: str) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
@@ -1549,7 +2193,7 @@ class MainWindow(QMainWindow):
         node_id: str,
         result: dict[str, Any],
         request: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> str:
         self._task_index += 1
         task_id = str(result.get("task_id", "")).strip()
         record_id = task_id or f"{kind}-{self._task_index:04d}"
@@ -1575,6 +2219,7 @@ class MainWindow(QMainWindow):
         self._refresh_queue_cards()
         self.refresh_history_table()
         self._notify_task_record(record)
+        return record_id
 
     def _notify_task_record(self, record: dict[str, Any]) -> None:
         status = str(record.get("status", "")).strip().lower()
@@ -2248,6 +2893,238 @@ class MainWindow(QMainWindow):
         node = item.text().splitlines()[0].strip()
         if node:
             self.target_input.setText(node)
+
+    def on_add_peer_clicked(self) -> None:
+        peer_id = self.peer_input.text().strip()
+        if not peer_id:
+            QMessageBox.warning(self, "Missing peer", "Please input target client id.")
+            return
+        if peer_id == self.config.client_id:
+            QMessageBox.information(self, "Same client", "Pick another client id.")
+            return
+        self._selected_peer_id = peer_id
+        self._client_peers.setdefault(
+            peer_id,
+            {
+                "client_id": peer_id,
+                "status": "manual",
+                "last_seen": "-",
+                "payload": {},
+            },
+        )
+        self._refresh_peer_list()
+        self._refresh_conversation_view()
+        self._save_conversation_state()
+
+    @asyncSlot()
+    async def on_announce_presence_clicked(self) -> None:
+        await self.service.publish_presence(status="online")
+        self._append_log("presence announced")
+
+    def on_peer_selection_changed(self) -> None:
+        if self._syncing_peer_selection:
+            return
+        item = self.peers_list.currentItem()
+        if item is None:
+            return
+        peer_id = item.data(Qt.UserRole)
+        if isinstance(peer_id, str):
+            self._selected_peer_id = peer_id
+            self.peer_input.setText(peer_id)
+            changed = self._mark_peer_read(peer_id)
+            self._load_latest_task_request_for_peer(
+                peer_id,
+                overwrite_script=self._can_replace_script_from_request(),
+            )
+            self._refresh_conversation_view()
+            if changed:
+                self._refresh_peer_list()
+            self._save_conversation_state()
+
+    def on_conversation_selection_changed(self) -> None:
+        item = self.conversation_list.currentItem()
+        if item is None:
+            return
+        message = item.data(Qt.UserRole + 1)
+        if not isinstance(message, dict):
+            return
+        msg_type = str(message.get("type", ""))
+        if msg_type == "task.request" and str(message.get("target_client_id", "")) == self.config.client_id:
+            self._load_task_request(message, overwrite_script=True)
+
+    def _selected_peer(self) -> str:
+        peer_id = self._selected_peer_id.strip() or self.peer_input.text().strip()
+        if peer_id and peer_id not in self._client_peers and peer_id != self.config.client_id:
+            self._client_peers[peer_id] = {
+                "client_id": peer_id,
+                "status": "manual",
+                "last_seen": "-",
+                "payload": {},
+            }
+            self._selected_peer_id = peer_id
+            self._refresh_peer_list()
+        return peer_id
+
+    @asyncSlot()
+    async def on_send_chat_clicked(self) -> None:
+        peer_id = self._selected_peer()
+        if not peer_id:
+            QMessageBox.warning(self, "Missing peer", "Please select or input target client id.")
+            return
+        text = self.chat_input.toPlainText().strip()
+        if not text:
+            QMessageBox.warning(self, "Missing message", "Please input a message.")
+            return
+        msg = await self.service.send_chat_message(
+            target_client_id=peer_id,
+            text=text,
+            conversation_id=self._conversation_id(peer_id),
+        )
+        self._append_conversation_message(direction="out", message=msg)
+        self.chat_input.clear()
+        self._refresh_conversation_state_views()
+        self._save_conversation_state()
+        self._append_log(f"message sent target={peer_id} id={msg.get('message_id')}")
+
+    @asyncSlot()
+    async def on_send_task_request_clicked(self) -> None:
+        peer_id = self._selected_peer()
+        if not peer_id:
+            QMessageBox.warning(self, "Missing peer", "Please select or input target client id.")
+            return
+        instruction = self.chat_input.toPlainText().strip() or self.instruction_input.toPlainText().strip()
+        if not instruction:
+            QMessageBox.warning(self, "Missing task", "Please input task request text.")
+            return
+        msg = await self.service.send_task_request(
+            target_client_id=peer_id,
+            instruction=instruction,
+            suggested_script=self.script_editor.toPlainText().strip(),
+            conversation_id=self._conversation_id(peer_id),
+        )
+        record_id = self._register_task_record(
+            kind="client-task-request",
+            node_id=peer_id,
+            result={"status": "sent", "ok": True, "message": msg},
+            request={"instruction": instruction, "target_client_id": peer_id},
+        )
+        message_id = str(msg.get("message_id", "")).strip()
+        if message_id:
+            self._task_request_records[message_id] = record_id
+        self._append_conversation_message(direction="out", message=msg)
+        self.chat_input.clear()
+        self._refresh_conversation_state_views()
+        self._save_conversation_state()
+        self._append_log(f"task request sent target={peer_id} id={msg.get('message_id')}")
+
+    def on_use_latest_task_request_clicked(self) -> None:
+        request = self._latest_task_request_for_peer(self._selected_peer_id) or self._latest_task_request
+        if not request:
+            QMessageBox.information(self, "No request", "No task request has been received yet.")
+            return
+        self._load_task_request(request, overwrite_script=True)
+
+    @asyncSlot()
+    async def on_run_local_script_clicked(self) -> None:
+        script = self.script_editor.toPlainText().strip()
+        if not script:
+            QMessageBox.warning(self, "Missing script", "Please write a Python script first.")
+            return
+        result = await self.service.execute_python_script(script=script, timeout_sec=30.0)
+        self._last_script_result = result
+        source = self._active_task_request or {}
+        source_message_id = str(source.get("message_id", "")).strip()
+        self._last_script_result_request_id = source_message_id
+        self.script_result_text.setPlainText(
+            json.dumps(
+                self._script_result_display_payload(request=source, result=result),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        source_peer = str(source.get("from_client_id", "")).strip() or self._selected_peer()
+        self._register_task_record(
+            kind="client-script",
+            node_id=source_peer or "local",
+            result={"status": "succeeded" if result.get("ok") else "failed", **result},
+            request={
+                "script": script,
+                "source_message_id": source.get("message_id"),
+                "source_client_id": source_peer,
+            },
+        )
+        inbound_record_id = self._inbound_task_request_records.get(source_message_id)
+        if inbound_record_id and inbound_record_id in self._task_records:
+            record = self._task_records[inbound_record_id]
+            record["status"] = "ready-to-return" if result.get("ok") else "script-failed"
+            record["result"] = {
+                "status": record["status"],
+                "ok": bool(result.get("ok", False)),
+                "message": source,
+                "script_result": result,
+            }
+            record["timeline"].append(
+                {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "stage": "client-script",
+                    "message": f"script ok={result.get('ok')} returncode={result.get('returncode')}",
+                }
+            )
+            self._refresh_task_item(inbound_record_id)
+            self._refresh_queue_cards()
+            self.refresh_history_table()
+            self._refresh_conversation_state_views()
+            self._save_conversation_state()
+        self._append_log(f"local script done ok={result.get('ok')} returncode={result.get('returncode')}")
+
+    @asyncSlot()
+    async def on_send_last_script_result_clicked(self) -> None:
+        if not self._active_task_request:
+            QMessageBox.information(self, "No request", "No task request is selected.")
+            return
+        source_message_id = str(self._active_task_request.get("message_id", "")).strip()
+        if not source_message_id or self._last_script_result_request_id != source_message_id:
+            QMessageBox.information(self, "No matching result", "Run the script for the selected request before sending.")
+            return
+        try:
+            result_payload = json.loads(self.script_result_text.toPlainText().strip() or "{}")
+        except json.JSONDecodeError as exc:
+            QMessageBox.warning(self, "Invalid result", str(exc))
+            return
+        if isinstance(result_payload, dict) and isinstance(result_payload.get("result"), dict):
+            result = result_payload["result"]
+        elif isinstance(result_payload, dict):
+            result = result_payload
+        else:
+            result = {}
+        target = str(self._active_task_request.get("from_client_id", "")).strip()
+        if not target:
+            QMessageBox.warning(self, "Missing target", "Cannot determine task requester.")
+            return
+        msg = await self.service.send_task_result(
+            target_client_id=target,
+            request_message_id=str(self._active_task_request.get("message_id", "")),
+            result=result,
+            conversation_id=str(self._active_task_request.get("conversation_id", "")) or self._conversation_id(target),
+        )
+        self._append_conversation_message(direction="out", message=msg)
+        inbound_record_id = self._inbound_task_request_records.get(source_message_id)
+        if inbound_record_id and inbound_record_id in self._task_records:
+            record = self._task_records[inbound_record_id]
+            record["status"] = "returned"
+            record["timeline"].append(
+                {
+                    "ts": str(msg.get("ts", datetime.now().isoformat(timespec="seconds"))),
+                    "stage": "task.result.sent",
+                    "message": f"sent result to {target}",
+                }
+            )
+            self._refresh_task_item(inbound_record_id)
+            self._refresh_queue_cards()
+            self.refresh_history_table()
+            self._refresh_conversation_state_views()
+            self._save_conversation_state()
+        self._append_log(f"task result sent target={target} id={msg.get('message_id')}")
 
     def on_node_search_changed(self, _: str) -> None:
         self._apply_node_search_filter()
@@ -3728,4 +4605,3 @@ class MainWindow(QMainWindow):
             return
         self._running = False
         super().closeEvent(event)
-

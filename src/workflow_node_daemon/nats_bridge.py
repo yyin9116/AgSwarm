@@ -13,6 +13,7 @@ from typing import Any
 from uuid import uuid4
 
 from workflow_node_daemon.daemon import WorkflowNodeDaemon
+from workflow_node_daemon.openclaw import OpenClawNodeHost
 from workflow_runtime.protocol import TaskEnvelope
 from workflow_transport import Subscription, TransportProvider, subjects
 
@@ -114,6 +115,7 @@ class NatsDaemonBridge:
             "config_sync_digest": None,
             "config_sync_sections": [],
         }
+        self._openclaw_host = OpenClawNodeHost(self.daemon.openclaw_config)
 
     async def start(self) -> None:
         if self._running:
@@ -143,6 +145,12 @@ class NatsDaemonBridge:
             await self.transport.subscribe(
                 subjects.node_config_sync_request(self.node_id),
                 self._on_config_sync_request,
+            )
+        )
+        self._subscriptions.append(
+            await self.transport.subscribe(
+                subjects.openclaw_command_request(self.node_id),
+                self._on_openclaw_command_request,
             )
         )
         self._subscriptions.append(
@@ -224,6 +232,7 @@ class NatsDaemonBridge:
         snapshot = asdict(self.daemon.get_node_snapshot())
         snapshot["node_id"] = self.node_id
         snapshot.update(self._config_sync_state)
+        snapshot["openclaw_node"] = self._openclaw_host.describe(adapters=self.daemon.runtime.adapter_names())
         await self.transport.publish(reply_subject, snapshot)
 
     async def _on_config_sync_request(self, _: str, payload: dict, reply_subject: str | None) -> None:
@@ -284,6 +293,32 @@ class NatsDaemonBridge:
                 "saved_path": str(latest_path.resolve()),
             },
         )
+
+    async def _on_openclaw_command_request(
+        self,
+        _: str,
+        payload: dict,
+        reply_subject: str | None,
+    ) -> None:
+        if not reply_subject:
+            return
+        command = str(payload.get("command") or "")
+        if not command.strip():
+            await self.transport.publish(
+                reply_subject,
+                {"ok": False, "error": "missing_openclaw_command"},
+            )
+            return
+        command_payload = payload.get("payload")
+        if not isinstance(command_payload, dict):
+            command_payload = {}
+        response = await self._openclaw_host.handle_command(
+            command=command,
+            payload=command_payload,
+            adapters=self.daemon.runtime.adapter_names(),
+        )
+        response["node_id"] = self.node_id
+        await self.transport.publish(reply_subject, response)
 
     async def _on_file_prepare_request(
         self,

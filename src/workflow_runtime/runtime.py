@@ -47,6 +47,35 @@ class Runtime:
     def adapter_names(self) -> list[str]:
         return sorted(self._adapters.keys())
 
+    def capability_summary(self) -> list[dict[str, object]]:
+        rows: list[dict[str, object]] = []
+        for name in self.adapter_names():
+            adapter = self._adapters[name]
+            provider = getattr(adapter, "capability_summary", None)
+            if callable(provider):
+                try:
+                    payload = provider()
+                except Exception as exc:  # pragma: no cover
+                    logger.warning("adapter capability summary failed adapter=%s error=%s", name, exc)
+                    payload = {}
+                if isinstance(payload, dict):
+                    row = dict(payload)
+                else:
+                    row = {}
+            else:
+                row = {}
+            row.setdefault("name", name)
+            row.setdefault("kind", "adapter")
+            rows.append(row)
+        return rows
+
+    def mcp_services(self) -> list[dict[str, object]]:
+        services: list[dict[str, object]] = []
+        for row in self.capability_summary():
+            if str(row.get("kind", "")).strip().lower() == "mcp":
+                services.append(dict(row))
+        return services
+
     def skill_catalog_info(self) -> dict[str, object]:
         if self._skill_catalog is None:
             return {

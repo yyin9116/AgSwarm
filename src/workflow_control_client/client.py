@@ -16,6 +16,7 @@ from workflow_transport import Subscription, TransportProvider, subjects
 
 EventHandler = Callable[[Event], Awaitable[None]]
 StatusHandler = Callable[[str, dict], Awaitable[None]]
+ClientMessageHandler = Callable[[str, dict], Awaitable[None]]
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,56 @@ class WorkflowControlClient:
 
         return await self.transport.subscribe(subjects.node_status(node_id), _on_message)
 
+    async def publish_client_presence(self, payload: dict | None = None) -> None:
+        body = {
+            "type": "presence",
+            "from_client_id": self.client_id,
+            "client_id": self.client_id,
+            "ts": datetime.now().isoformat(timespec="seconds"),
+        }
+        if payload:
+            body.update(payload)
+        await self.transport.publish(subjects.client_presence(self.client_id), body)
+
+    async def subscribe_client_presence(self, *, handler: ClientMessageHandler) -> Subscription:
+        async def _on_message(subject: str, payload: dict, _: str | None) -> None:
+            await handler(subject, payload)
+
+        return await self.transport.subscribe(subjects.client_presence(), _on_message)
+
+    async def send_client_message(
+        self,
+        *,
+        target_client_id: str,
+        message_type: str,
+        payload: dict | None = None,
+        conversation_id: str | None = None,
+    ) -> dict:
+        target = target_client_id.strip()
+        if not target:
+            raise ValueError("target_client_id is required")
+        msg_type = message_type.strip()
+        if not msg_type:
+            raise ValueError("message_type is required")
+        message_id = str(uuid4())
+        body = {
+            "type": msg_type,
+            "message_id": message_id,
+            "conversation_id": conversation_id or f"{self.client_id}:{target}",
+            "from_client_id": self.client_id,
+            "target_client_id": target,
+            "payload": payload or {},
+            "ts": datetime.now().isoformat(timespec="seconds"),
+        }
+        await self.transport.publish(subjects.client_inbox(target), body)
+        return body
+
+    async def subscribe_client_inbox(self, *, handler: ClientMessageHandler) -> Subscription:
+        async def _on_message(subject: str, payload: dict, _: str | None) -> None:
+            await handler(subject, payload)
+
+        return await self.transport.subscribe(subjects.client_inbox(self.client_id), _on_message)
+
     async def request_node_snapshot(
         self,
         *,
@@ -95,6 +146,87 @@ class WorkflowControlClient:
             {
                 "from_client_id": self.client_id,
                 "config_payload": config_payload,
+            },
+            timeout_sec=timeout_sec,
+        )
+
+    async def discover_openclaw_nodes(
+        self,
+        *,
+        timeout_sec: float = 1.0,
+        require_capabilities: list[str] | None = None,
+    ) -> list[dict]:
+        if timeout_sec <= 0:
+            raise ValueError("timeout_sec must be > 0")
+        required = set(require_capabilities or [])
+        nodes_by_id: dict[str, dict] = {}
+
+        async def _on_status(_: str, payload: dict) -> None:
+            node_id = payload.get("node_id")
+            openclaw = payload.get("openclaw_node")
+            if not isinstance(node_id, str) or not isinstance(openclaw, dict):
+                return
+            capabilities = openclaw.get("capabilities")
+            capability_set = {str(x) for x in capabilities} if isinstance(capabilities, list) else set()
+            if not required.issubset(capability_set):
+                return
+            nodes_by_id[node_id] = dict(payload)
+
+        sub = await self.subscribe_node_status(handler=_on_status)
+        try:
+            await asyncio.sleep(timeout_sec)
+        finally:
+            await sub.unsubscribe()
+        return [nodes_by_id[key] for key in sorted(nodes_by_id)]
+
+    async def resolve_openclaw_device_node(
+        self,
+        *,
+        device_id: str,
+        timeout_sec: float = 1.0,
+        require_capabilities: list[str] | None = None,
+    ) -> dict:
+        wanted = device_id.strip()
+        if not wanted:
+            raise ValueError("device_id is required")
+        nodes = await self.discover_openclaw_nodes(
+            timeout_sec=timeout_sec,
+            require_capabilities=require_capabilities,
+        )
+        matches: list[dict] = []
+        for node in nodes:
+            openclaw = node.get("openclaw_node")
+            if not isinstance(openclaw, dict):
+                continue
+            candidates = {
+                str(node.get("node_id") or ""),
+                str(openclaw.get("device_id") or ""),
+            }
+            if wanted in candidates:
+                matches.append(node)
+        if not matches:
+            raise LookupError(f"No OpenClaw node found for device_id={wanted!r}")
+        if len(matches) > 1:
+            node_ids = sorted(str(item.get("node_id")) for item in matches)
+            raise LookupError(f"Multiple OpenClaw nodes found for device_id={wanted!r}: {node_ids}")
+        return matches[0]
+
+    async def request_openclaw_command(
+        self,
+        *,
+        node_id: str,
+        command: str,
+        payload: dict | None = None,
+        timeout_sec: float = 2.0,
+    ) -> dict:
+        if not command.strip():
+            raise ValueError("command is required")
+        return await self.transport.request(
+            subjects.openclaw_command_request(node_id),
+            {
+                "from_client_id": self.client_id,
+                "command": command,
+                "payload": payload or {},
             },
             timeout_sec=timeout_sec,
         )
