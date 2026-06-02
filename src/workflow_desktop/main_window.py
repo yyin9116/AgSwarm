@@ -173,31 +173,58 @@ class MainWindow(QMainWindow):
         self._connection_state = "disconnected"
         self._last_connection_error = ""
 
-        self.setWindowTitle(f"AgSwarm - {self._display_name}")
+        self.setWindowTitle(f"AgSwarm Client - {self._display_name}")
         self.resize(1460, 900)
         self.setMinimumSize(1180, 760)
 
         root = QWidget()
         self.setCentralWidget(root)
         outer = QVBoxLayout(root)
-        outer.setContentsMargins(12, 12, 12, 12)
-        outer.setSpacing(8)
+        outer.setContentsMargins(22, 18, 22, 18)
+        outer.setSpacing(12)
 
-        self.title_label = QLabel(f"Workflow Desktop | {self._display_name}")
-        self.subtitle_label = QLabel("LAN task dispatch, MCP execution, artifact return and live telemetry")
-        outer.addWidget(self.title_label)
-        outer.addWidget(self.subtitle_label)
-        outer.addWidget(self._build_top_status_bar())
+        header = QWidget()
+        header.setObjectName("appHeader")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(12)
+        self.app_icon_label = QLabel("A")
+        self.app_icon_label.setObjectName("appIcon")
+        self.app_icon_label.setAlignment(Qt.AlignCenter)
+        header_layout.addWidget(self.app_icon_label)
+        title_col = QVBoxLayout()
+        title_col.setContentsMargins(0, 0, 0, 0)
+        title_col.setSpacing(2)
+        self.title_label = QLabel(f"AgSwarm Client | {self._display_name}")
+        self.subtitle_label = QLabel("Ask me to orchestrate tasks across your devices.")
+        title_col.addWidget(self.title_label)
+        title_col.addWidget(self.subtitle_label)
+        header_layout.addLayout(title_col, 1)
+        header_layout.addWidget(self._build_top_status_bar(), 2)
+        outer.addWidget(header)
         self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self.tabs.setTabPosition(QTabWidget.South)
+        self.tabs.setUsesScrollButtons(False)
         outer.addWidget(self.tabs, 1)
-        self.tabs.addTab(self._build_conversation_tab(), "Conversations")
-        self.tabs.addTab(self._build_task_center_tab(), "Task Center")
-        self.tabs.addTab(self._build_task_detail_tab(), "Task Detail")
-        self.tabs.addTab(self._build_results_tab(), "Results")
-        self.tabs.addTab(self._build_history_tab(), "History")
-        self.tabs.addTab(self._build_notifications_tab(), "Notifications")
-        self.tabs.addTab(self._build_mcp_tab(), "MCP Config")
-        self.tabs.addTab(self._build_settings_tab(), "Settings")
+        self._tab_titles = [
+            "Copilot",
+            "Devices",
+            "Task Detail",
+            "Files",
+            "Activity",
+            "Alerts",
+            "MCP Config",
+            "Settings",
+        ]
+        self.tabs.addTab(self._build_conversation_tab(), self._tab_titles[0])
+        self.tabs.addTab(self._build_task_center_tab(), self._tab_titles[1])
+        self.tabs.addTab(self._build_task_detail_tab(), self._tab_titles[2])
+        self.tabs.addTab(self._build_results_tab(), self._tab_titles[3])
+        self.tabs.addTab(self._build_history_tab(), self._tab_titles[4])
+        self.tabs.addTab(self._build_notifications_tab(), self._tab_titles[5])
+        self.tabs.addTab(self._build_mcp_tab(), self._tab_titles[6])
+        self.tabs.addTab(self._build_settings_tab(), self._tab_titles[7])
         self._apply_prototype_styles()
 
         self._refresh_header()
@@ -226,12 +253,12 @@ class MainWindow(QMainWindow):
         return translate_text(text, self._language)
 
     def _apply_language(self) -> None:
-        self.setWindowTitle("AgSwarm")
-        self.title_label.setText(self._tr("Workflow Controller Prototype (Desktop)"))
-        self.subtitle_label.setText(self._tr("LAN task dispatch, MCP execution, artifact return and live telemetry"))
-        for i in range(self.tabs.count()):
-            current = self.tabs.tabText(i)
-            self.tabs.setTabText(i, self._tr(current))
+        self.setWindowTitle("AgSwarm Client")
+        self.title_label.setText(self._tr("AgSwarm Client"))
+        self.subtitle_label.setText(self._tr("Ask me to orchestrate tasks across your devices."))
+        for i, title in enumerate(getattr(self, "_tab_titles", [])):
+            if i < self.tabs.count():
+                self.tabs.setTabText(i, self._tr(title))
         for group in self.findChildren(QGroupBox):
             title = group.title().strip()
             if title:
@@ -267,13 +294,13 @@ class MainWindow(QMainWindow):
         split = QSplitter(Qt.Horizontal)
         layout.addWidget(split, 1)
 
-        peers_box = QGroupBox("Client Peers")
+        peers_box = QGroupBox("Devices")
         peers_layout = QVBoxLayout(peers_box)
         self.peer_input = QLineEdit()
-        self.peer_input.setPlaceholderText("target client id, e.g. desktop-b")
+        self.peer_input.setPlaceholderText("target device/client id, e.g. desktop-b")
         peers_layout.addWidget(self.peer_input)
         peer_row = QHBoxLayout()
-        add_peer = QPushButton("Add Peer")
+        add_peer = QPushButton("Add Device")
         add_peer.clicked.connect(self.on_add_peer_clicked)
         peer_row.addWidget(add_peer)
         announce = QPushButton("Announce")
@@ -285,19 +312,19 @@ class MainWindow(QMainWindow):
         peers_layout.addWidget(self.peers_list, 1)
         split.addWidget(peers_box)
 
-        conversation_box = QGroupBox("Conversation")
+        conversation_box = QGroupBox("Agent Copilot")
         conversation_layout = QVBoxLayout(conversation_box)
-        self.conversation_title = QLabel("Select or add a peer.")
+        self.conversation_title = QLabel("Select or add a device.")
         self.conversation_title.setObjectName("queueTitle")
         conversation_layout.addWidget(self.conversation_title)
-        self.conversation_summary_label = QLabel("No conversation selected.")
+        self.conversation_summary_label = QLabel("No device conversation selected.")
         self.conversation_summary_label.setWordWrap(True)
         conversation_layout.addWidget(self.conversation_summary_label)
         self.conversation_list = QListWidget()
         self.conversation_list.itemSelectionChanged.connect(self.on_conversation_selection_changed)
         conversation_layout.addWidget(self.conversation_list, 1)
         self.chat_input = QPlainTextEdit()
-        self.chat_input.setPlaceholderText("message or task request")
+        self.chat_input.setPlaceholderText("Ask AgSwarm to send a message, run a task, or return a file...")
         self.chat_input.setFixedHeight(90)
         conversation_layout.addWidget(self.chat_input)
         action_row = QHBoxLayout()
@@ -315,7 +342,7 @@ class MainWindow(QMainWindow):
         conversation_layout.addLayout(action_row)
         split.addWidget(conversation_box)
 
-        task_box = QGroupBox("Local Script Runner")
+        task_box = QGroupBox("Incoming Task")
         task_layout = QVBoxLayout(task_box)
         self.script_request_label = QLabel("No task request selected.")
         self.script_request_label.setWordWrap(True)
@@ -361,14 +388,14 @@ class MainWindow(QMainWindow):
         return scroll
 
     def _build_queue_artifacts_column(self) -> QWidget:
-        box = QGroupBox("Task Queue and Artifacts")
+        box = QGroupBox("Activity and Files")
         box.setObjectName("queueColumn")
         layout = QVBoxLayout(box)
         layout.addWidget(self._build_right_panel(), 3)
 
-        artifacts = QGroupBox("Selected Task Artifacts")
+        artifacts = QGroupBox("Returned Files")
         artifacts_layout = QVBoxLayout(artifacts)
-        self.queue_hint_label = QLabel("Live progress, retries, outputs and quick operations")
+        self.queue_hint_label = QLabel("Live progress, retries, outputs and returned files")
         self.queue_hint_label.setObjectName("queueHint")
         layout.addWidget(self.queue_hint_label)
         self.quick_artifact_list = QListWidget()
@@ -387,7 +414,7 @@ class MainWindow(QMainWindow):
         artifacts_layout.addLayout(quick_row)
         layout.addWidget(artifacts, 2)
 
-        quick_ops = QGroupBox("Quick Operations")
+        quick_ops = QGroupBox("Developer Tools")
         quick_ops_layout = QVBoxLayout(quick_ops)
         self.rerun_btn = QPushButton("Re-run Selected Task")
         self.rerun_btn.clicked.connect(self.on_rerun_selected_task_clicked)
@@ -425,70 +452,105 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(
             """
             QWidget { font-family: "Inter", "Segoe UI", "PingFang SC", "Microsoft YaHei"; font-size: 13px; }
-            QMainWindow, QWidget { background: #F3F5F8; color: #1F3550; }
-            QLabel#title { font-size: 28px; font-weight: 700; color: #132238; }
-            QLabel#subtitle { font-size: 16px; color: #4A637D; }
+            QMainWindow, QWidget { background: #F5F5F7; color: #1D1D1F; }
+            QWidget#appHeader { background: transparent; }
+            QLabel#appIcon {
+                min-width: 42px; max-width: 42px; min-height: 42px; max-height: 42px;
+                background: #14B8A6; color: #FFFFFF; border-radius: 12px;
+                font-size: 23px; font-weight: 800;
+            }
+            QLabel#title { font-size: 26px; font-weight: 700; color: #1D1D1F; }
+            QLabel#subtitle { font-size: 14px; color: #6B7280; }
             QGroupBox {
-                border: 1px solid #D8E1EC; border-radius: 10px; margin-top: 12px; padding-top: 8px;
-                font-size: 14px; font-weight: 700;
+                background: #FFFFFF;
+                border: 1px solid #ECEEF2; border-radius: 18px; margin-top: 14px; padding-top: 10px;
+                font-size: 14px; font-weight: 700; color: #111827;
             }
-            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }
-            QGroupBox#nodesColumn { background: #F6FAFF; }
-            QGroupBox#builderColumn { background: #F9FBF7; }
-            QGroupBox#queueColumn { background: #FCFAFF; }
-            QGroupBox#nodesColumn, QGroupBox#nodesColumn::title { color: #1F3550; }
-            QGroupBox#builderColumn, QGroupBox#builderColumn::title { color: #26412A; }
-            QGroupBox#queueColumn, QGroupBox#queueColumn::title { color: #3F2D62; }
-            QPushButton { border: 1px solid #C7D3E3; border-radius: 6px; padding: 6px 10px; background: #FFFFFF; }
-            QPushButton:hover { background: #EFF4FB; }
-            QTabWidget::pane { border: 1px solid #D6DEE9; border-radius: 8px; background: #F3F5F8; top: -1px; }
-            QTabBar::tab { background: #EAF1FB; border: 1px solid #C9D6E7; padding: 7px 12px; margin-right: 4px; border-top-left-radius: 6px; border-top-right-radius: 6px; }
-            QTabBar::tab:selected { background: #FFFFFF; border-bottom-color: #FFFFFF; }
-            QListWidget, QPlainTextEdit, QLineEdit, QTableWidget { background: #FFFFFF; border: 1px solid #D6DEE9; border-radius: 8px; }
+            QGroupBox::title {
+                subcontrol-origin: margin; left: 16px; padding: 0 7px;
+                background: #FFFFFF; color: #111827;
+            }
+            QGroupBox#nodesColumn, QGroupBox#builderColumn, QGroupBox#queueColumn { background: #FFFFFF; }
+            QGroupBox#nodesColumn, QGroupBox#nodesColumn::title { color: #111827; }
+            QGroupBox#builderColumn, QGroupBox#builderColumn::title { color: #111827; }
+            QGroupBox#queueColumn, QGroupBox#queueColumn::title { color: #111827; }
+            QPushButton {
+                border: 1px solid #E5E7EB; border-radius: 12px; padding: 8px 12px;
+                background: #FFFFFF; color: #374151; font-weight: 600;
+            }
+            QPushButton:hover { background: #F9FAFB; border-color: #D1D5DB; }
+            QPushButton:disabled { background: #F3F4F6; color: #9CA3AF; }
+            QTabWidget::pane { border: 0; background: transparent; }
+            QTabBar {
+                qproperty-drawBase: 0;
+                alignment: center;
+                background: rgba(255,255,255,210);
+                border: 1px solid #FFFFFF;
+                border-radius: 26px;
+            }
+            QTabBar::tab {
+                background: transparent; border: 0;
+                min-width: 92px; min-height: 42px;
+                padding: 8px 14px; margin: 5px 2px;
+                border-radius: 21px; color: #6B7280; font-weight: 700;
+            }
+            QTabBar::tab:selected { background: #CCFBF1; color: #0F766E; }
+            QTabBar::tab:hover:!selected { background: #F3F4F6; color: #374151; }
+            QListWidget, QPlainTextEdit, QLineEdit, QTableWidget {
+                background: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 14px;
+                selection-background-color: #CCFBF1; selection-color: #0F172A;
+            }
             QLineEdit, QComboBox {
-                min-height: 30px;
-                padding: 3px 8px;
+                min-height: 34px;
+                padding: 4px 10px;
+                background: #F9FAFB;
+                border: 1px solid #E5E7EB;
+                border-radius: 12px;
             }
-            QListWidget#nodeCards::item { margin: 6px; padding: 10px; border: 1px solid #D8E1EC; border-radius: 10px; background: #FFFFFF; }
-            QListWidget#nodeCards::item:selected { background: #EAF2FF; border-color: #BFD3F4; color: #1D3248; }
-            QListWidget#queueList::item { margin: 4px; padding: 8px; border: 1px solid #E2DBF2; border-radius: 8px; background: #FFFFFF; }
-            QListWidget#queueList::item:selected { background: #F5F0FF; border-color: #CFBFEF; }
-            QListWidget#notificationList::item { margin: 4px; padding: 8px; border: 1px solid #E1DCEC; border-radius: 8px; background: #FFFFFF; }
-            QListWidget#notificationList::item:selected { background: #F6F1FF; border-color: #D7C9EE; }
-            QPlainTextEdit#runtimeLog { background: #14212D; color: #D4E4F3; border: 1px solid #203548; }
-            QPushButton#dispatchPrimary { background: #2D7D46; color: #FFFFFF; border-color: #2D7D46; font-weight: 700; }
-            QPushButton#dispatchDryRun { background: #EAF2FF; color: #2A4C76; border-color: #BFD3F4; font-weight: 700; }
-            QPushButton#dispatchCancel { background: #FFF0EB; color: #9A4C24; border-color: #F4CCBC; font-weight: 700; }
-            QLabel#statusLeft { color: #1E4F7A; font-size: 14px; font-weight: 600; }
-            QLabel#statusRight { color: #6A7888; font-size: 13px; }
-            QLabel#nodesCount { color: #2D7D46; font-weight: 600; }
-            QFrame#leftHintPanel { background: #EDF4FF; border: 1px solid #D3E4FA; border-radius: 10px; }
-            QLabel#leftHintTitle { color: #264A75; font-weight: 700; font-size: 14px; }
-            QLabel#leftHintBody { color: #446487; }
-            QFrame#queueCard { background: #FFFFFF; border: 1px solid #DED5F1; border-radius: 10px; }
-            QLabel#queueTitle { color: #3F2D62; font-size: 16px; font-weight: 700; }
-            QLabel#queueBody { color: #66548C; }
-            QLabel#queueHint { color: #776593; }
+            QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus { border-color: #14B8A6; }
+            QListWidget::item { margin: 4px; padding: 8px; border-radius: 12px; }
+            QListWidget#nodeCards::item { margin: 7px; padding: 12px; border: 1px solid #F1F3F5; border-radius: 16px; background: #FFFFFF; }
+            QListWidget#nodeCards::item:selected { background: #ECFDF5; border-color: #99F6E4; color: #0F172A; }
+            QListWidget#queueList::item { margin: 5px; padding: 10px; border: 1px solid #F1F3F5; border-radius: 14px; background: #FFFFFF; }
+            QListWidget#queueList::item:selected { background: #ECFDF5; border-color: #99F6E4; }
+            QListWidget#notificationList::item { margin: 5px; padding: 10px; border: 1px solid #F1F3F5; border-radius: 14px; background: #FFFFFF; }
+            QListWidget#notificationList::item:selected { background: #EEF2FF; border-color: #C7D2FE; }
+            QPlainTextEdit#runtimeLog { background: #111827; color: #D1FAE5; border: 1px solid #1F2937; font-family: "JetBrains Mono", "SF Mono", monospace; }
+            QPushButton#dispatchPrimary { background: #0D9488; color: #FFFFFF; border-color: #0D9488; font-weight: 800; }
+            QPushButton#dispatchPrimary:hover { background: #0F766E; }
+            QPushButton#dispatchDryRun { background: #EFF6FF; color: #2563EB; border-color: #DBEAFE; font-weight: 700; }
+            QPushButton#dispatchCancel { background: #FEF2F2; color: #DC2626; border-color: #FEE2E2; font-weight: 700; }
+            QLabel#statusLeft { color: #374151; font-size: 13px; font-weight: 600; }
+            QLabel#statusRight { color: #6B7280; font-size: 12px; }
+            QLabel#nodesCount { color: #0D9488; font-weight: 700; }
+            QFrame#leftHintPanel { background: #F0FDFA; border: 1px solid #CCFBF1; border-radius: 16px; }
+            QLabel#leftHintTitle { color: #0F766E; font-weight: 700; font-size: 14px; }
+            QLabel#leftHintBody { color: #475569; }
+            QFrame#queueCard { background: #FFFFFF; border: 1px solid #ECEEF2; border-radius: 16px; }
+            QLabel#queueTitle { color: #111827; font-size: 16px; font-weight: 700; }
+            QLabel#queueBody { color: #6B7280; }
+            QLabel#queueHint { color: #6B7280; }
             """
         )
+        self.app_icon_label.setObjectName("appIcon")
         self.title_label.setObjectName("title")
         self.subtitle_label.setObjectName("subtitle")
         self.status_left_label.setObjectName("statusLeft")
         self.status_right_label.setObjectName("statusRight")
 
     def _build_left_panel(self) -> QWidget:
-        box = QGroupBox("Online Nodes")
+        box = QGroupBox("Nearby Devices")
         box.setObjectName("nodesColumn")
         layout = QVBoxLayout(box)
         self.node_count_label = QLabel("0 active")
         self.node_count_label.setObjectName("nodesCount")
         layout.addWidget(self.node_count_label)
         self.node_search_input = QLineEdit()
-        self.node_search_input.setPlaceholderText("Search by node name or status")
+        self.node_search_input.setPlaceholderText("Search devices by name or status")
         self.node_search_input.textChanged.connect(self.on_node_search_changed)
         layout.addWidget(self.node_search_input)
         self.node_input = QLineEdit(",".join(self.config.node_candidates))
-        self.node_input.setPlaceholderText("manual node ids (optional), comma separated")
+        self.node_input.setPlaceholderText("manual device/node ids (optional), comma separated")
         layout.addWidget(self.node_input)
         self.required_adapters_input = QLineEdit("echo,latex_mcp")
         self.required_adapters_input.setPlaceholderText("required adapters, comma separated")
@@ -520,17 +582,17 @@ class MainWindow(QMainWindow):
         hint = QFrame()
         hint.setObjectName("leftHintPanel")
         hint_layout = QVBoxLayout(hint)
-        hint_title = QLabel("Quick Node Actions")
+        hint_title = QLabel("Quick Device Actions")
         hint_title.setObjectName("leftHintTitle")
         hint_layout.addWidget(hint_title)
-        self.node_hint_label = QLabel("- Wake sleeping node\n- Re-check MCP capabilities\n- Open remote logs stream")
+        self.node_hint_label = QLabel("- Wake sleeping device\n- Re-check agent capabilities\n- Open remote logs stream")
         self.node_hint_label.setObjectName("leftHintBody")
         hint_layout.addWidget(self.node_hint_label)
         layout.addWidget(hint)
         return box
 
     def _build_center_panel(self) -> QWidget:
-        box = QGroupBox("Create and Dispatch Task")
+        box = QGroupBox("Send Task or File")
         box.setObjectName("builderColumn")
         layout = QVBoxLayout(box)
         from workflow_desktop.widgets import DropPathListWidget
@@ -553,7 +615,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(row)
 
         self.target_input = QLineEdit(self.config.node_candidates[0] if self.config.node_candidates else "")
-        self.target_input.setPlaceholderText("target node id")
+        self.target_input.setPlaceholderText("target device/node id")
         self.instruction_input = QPlainTextEdit("process uploaded inputs")
         self.instruction_input.setFixedHeight(100)
         self.skills_input = QLineEdit()

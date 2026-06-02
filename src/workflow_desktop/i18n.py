@@ -8,6 +8,22 @@ LANGUAGE_LABELS = {
 }
 
 EN_TO_ZH: dict[str, str] = {
+    "AgSwarm Client": "AgSwarm 客户端",
+    "Ask me to orchestrate tasks across your devices.": "让我为你在多设备之间编排任务。",
+    "Copilot": "助手",
+    "Devices": "设备",
+    "Files": "文件",
+    "Activity": "活动",
+    "Alerts": "提醒",
+    "Nearby Devices": "附近设备",
+    "Agent Copilot": "Agent 助手",
+    "Incoming Task": "传入任务",
+    "Activity and Files": "活动与文件",
+    "Returned Files": "返回文件",
+    "Developer Tools": "开发工具",
+    "Quick Device Actions": "设备快捷操作",
+    "Send Task or File": "发送任务或文件",
+    "Add Device": "添加设备",
     "Task Center": "任务中心",
     "Task Detail": "任务详情",
     "Results": "结果",
