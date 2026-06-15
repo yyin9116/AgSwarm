@@ -464,13 +464,13 @@ html[data-mantine-color-scheme="dark"] {
     max-width: 42rem;
     margin: 0;
     color: var(--agswarm-text-muted);
-    font-size: 0.7rem;
+    font-size: 0.66rem;
   }
 
   .pi-gui-message-status-stack {
     display: grid;
-    gap: 0.28rem;
-    margin: 0 0 0.42rem 0.04rem;
+    gap: 0.18rem;
+    margin: 0 0 0.34rem 0.04rem;
   }
 
   .pi-gui-status-loose {
@@ -481,7 +481,7 @@ html[data-mantine-color-scheme="dark"] {
   .pi-gui-tool-header {
     display: inline-flex;
     align-items: center;
-    gap: 0.35rem;
+    gap: 0.3rem;
     min-width: 0;
     border: 0;
     background: transparent;
@@ -510,14 +510,14 @@ html[data-mantine-color-scheme="dark"] {
 
   .pi-gui-reasoning-body {
     max-width: 42rem;
-    margin: 0.26rem 0 0 0.68rem;
+    margin: 0.22rem 0 0 0.62rem;
     border-left: 1px solid color-mix(in srgb, var(--agswarm-border) 76%, transparent);
-    padding-left: 0.65rem;
+    padding-left: 0.6rem;
   }
 
   .pi-gui-reasoning-body .pi-gui-markdown {
-    font-size: 0.72rem;
-    line-height: 1.45;
+    font-size: 0.68rem;
+    line-height: 1.42;
   }
 
   .pi-gui-tool-header:disabled {
@@ -536,11 +536,11 @@ html[data-mantine-color-scheme="dark"] {
 
   .pi-gui-tool-header small {
     color: color-mix(in srgb, var(--agswarm-text-muted) 82%, transparent);
-    font-size: 0.64rem;
+    font-size: 0.61rem;
   }
 
   .pi-gui-tool-success {
-    opacity: 0.82;
+    opacity: 0.72;
   }
 
   .pi-gui-tool-error,
@@ -558,7 +558,7 @@ html[data-mantine-color-scheme="dark"] {
     margin: 0.38rem 0 0 1.1rem;
     padding: 0.64rem 0.7rem;
     color: var(--agswarm-text);
-    font-size: 0.72rem;
+    font-size: 0.68rem;
     line-height: 1.45;
     white-space: pre-wrap;
     word-break: break-word;

@@ -518,6 +518,8 @@ export default function App() {
                 agDisplayName={agDisplayName}
                 agAvatarSeed={agAvatarSeed}
                 deviceAliases={deviceAliases}
+                devices={devices}
+                deviceStatusMessage={deviceStatusMessage}
               />
             </Suspense>
           </section>

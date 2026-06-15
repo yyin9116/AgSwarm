@@ -3,6 +3,7 @@ import { ChevronLeft, ChevronRight, Copy, MessageSquareText, Plus, RefreshCw, Se
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { renderPiMarkdown } from '../lib/piMarkdown';
 import type { DeviceAliasSettings } from '../lib/settingsStore';
+import type { Device } from './DevicesView';
 import {
   createPiWebSessionSocket,
   ensurePiWebReady,
@@ -28,6 +29,8 @@ type PiWebNativeChatViewProps = {
   agDisplayName: string;
   agAvatarSeed: string;
   deviceAliases: Record<string, DeviceAliasSettings>;
+  devices: Device[];
+  deviceStatusMessage: string;
 };
 
 type TimelineMessage = {
@@ -92,7 +95,7 @@ type SpeakerIdentity = {
   };
 };
 
-const DEFAULT_WORKSPACE = '/Users/yinyin/test/AgSwarm';
+const DEFAULT_WORKSPACE = '~';
 const AGSWARM_SKILL_COMMANDS: PiWebSlashCommand[] = [
   {
     name: 'skill-search',
@@ -124,6 +127,8 @@ export function PiWebNativeChatView({
   agDisplayName,
   agAvatarSeed,
   deviceAliases,
+  devices,
+  deviceStatusMessage,
 }: PiWebNativeChatViewProps) {
   const cwd = piCwd.trim() || DEFAULT_WORKSPACE;
   const [sessionsOpen, setSessionsOpen] = useState(false);
@@ -267,14 +272,25 @@ export function PiWebNativeChatView({
     setIsSubmitting(true);
     setTimelineItems(items => [...items, userTimelineMessage(text)]);
     try {
+      const prompt = withAgSwarmRuntimeContext(text, {
+        devices,
+        deviceStatusMessage,
+        localNodeId,
+        localDeviceLabel: displayDeviceLabel,
+      });
       const skillPrompt = agswarmSkillCommandPrompt(text);
       if (skillPrompt) {
-        await sendPiWebPrompt(selectedSession, skillPrompt);
+        await sendPiWebPrompt(selectedSession, withAgSwarmRuntimeContext(skillPrompt, {
+          devices,
+          deviceStatusMessage,
+          localNodeId,
+          localDeviceLabel: displayDeviceLabel,
+        }));
       } else if (text.startsWith('/')) {
         const result = await runPiWebCommand(selectedSession, text);
         setTimelineItems(items => applyCommandResult(items, result));
       } else {
-        await sendPiWebPrompt(selectedSession, text);
+        await sendPiWebPrompt(selectedSession, prompt);
       }
       setSessions(current => promoteSession(current, selectedSession.id));
     } catch (error) {
@@ -285,7 +301,7 @@ export function PiWebNativeChatView({
       setIsSubmitting(false);
       window.setTimeout(() => composerRef.current?.focus(), 80);
     }
-  }, [composerText, isSubmitting, selectedSession]);
+  }, [composerText, deviceStatusMessage, devices, displayDeviceLabel, isSubmitting, localNodeId, selectedSession]);
 
   const isRunning = Boolean(status?.isStreaming || status?.isCompacting || status?.isBashRunning || isSubmitting);
 
@@ -628,7 +644,7 @@ function StatusItem({
 function buildTimelineRows(items: TimelineItem[]): TimelineRenderRow[] {
   const rows: TimelineRenderRow[] = [];
   let pendingStatuses: TimelineItem[] = [];
-  for (const item of items) {
+  for (const item of compactTimelineItems(items)) {
     if (item.kind === 'message') {
       if (item.role === 'assistant' && pendingStatuses.length) {
         rows.push({
@@ -657,24 +673,24 @@ function buildTimelineRows(items: TimelineItem[]): TimelineRenderRow[] {
 
 function applyPiWebEvent(items: TimelineItem[], event: PiWebSessionEvent): TimelineItem[] {
   const now = new Date().toISOString();
-  if (event.type === 'message.append') return mergeAppendedMessage(items, messagesToTimeline([event.message]));
+  if (event.type === 'message.append') return compactTimelineItems(mergeAppendedMessage(items, messagesToTimeline([event.message])));
   if (event.type === 'assistant.delta') {
     const lastAssistant = [...items].reverse().find(item => item.kind === 'message' && item.role === 'assistant' && item.id.startsWith('assistant-stream-')) as TimelineMessage | undefined;
     const item: TimelineMessage = lastAssistant
       ? { ...lastAssistant, text: lastAssistant.text + event.text }
       : { kind: 'message', id: `assistant-stream-${crypto.randomUUID()}`, role: 'assistant', text: event.text, createdAt: now };
-    return upsertTimeline(items, item);
+    return compactTimelineItems(upsertTimeline(items, item));
   }
   if (event.type === 'assistant.thinking.delta') {
     const lastReasoning = [...items].reverse().find(item => item.kind === 'reasoning' && item.status === 'running') as TimelineReasoning | undefined;
     const item: TimelineReasoning = lastReasoning
       ? { ...lastReasoning, text: lastReasoning.text + event.text }
       : { kind: 'reasoning', id: `reasoning-${crypto.randomUUID()}`, text: event.text, status: 'running', createdAt: now };
-    return upsertTimeline(items, item);
+    return compactTimelineItems(upsertTimeline(items, item));
   }
   if (event.type === 'tool.start') {
     const callId = event.toolCallId || `tool-${crypto.randomUUID()}`;
-    return collapseCompletedTools(upsertTimeline(closeRunningReasoning(items), {
+    return compactTimelineItems(upsertTimeline(closeRunningReasoning(items), {
       kind: 'tool',
       id: `tool-${callId}`,
       callId,
@@ -688,7 +704,7 @@ function applyPiWebEvent(items: TimelineItem[], event: PiWebSessionEvent): Timel
   if (event.type === 'tool.update' || event.type === 'tool.end') {
     const existing = items.find(item => item.kind === 'tool' && item.callId === event.toolCallId) as TimelineTool | undefined;
     if (!existing) return items;
-    return collapseCompletedTools(upsertTimeline(items, {
+    return compactTimelineItems(upsertTimeline(items, {
       ...existing,
       status: event.type === 'tool.end' ? event.isError ? 'error' : 'success' : existing.status,
       label: event.type === 'tool.end' ? completedToolLabel(event.toolName) : existing.label,
@@ -697,7 +713,7 @@ function applyPiWebEvent(items: TimelineItem[], event: PiWebSessionEvent): Timel
   }
   if (event.type === 'shell.start') {
     const callId = `shell-${crypto.randomUUID()}`;
-    return collapseCompletedTools([...closeRunningReasoning(items), {
+    return compactTimelineItems([...closeRunningReasoning(items), {
       kind: 'tool',
       id: `tool-${callId}`,
       callId,
@@ -714,7 +730,7 @@ function applyPiWebEvent(items: TimelineItem[], event: PiWebSessionEvent): Timel
     const nextOutput = event.type === 'shell.chunk'
       ? `${typeof existing.output === 'string' ? existing.output : ''}${event.chunk}`
       : event.output ?? existing.output;
-    return collapseCompletedTools(upsertTimeline(items, {
+    return compactTimelineItems(upsertTimeline(items, {
       ...existing,
       status: event.type === 'shell.end' ? event.isError || (event.exitCode ?? 0) !== 0 ? 'error' : 'success' : 'running',
       label: event.type === 'shell.end' ? completedToolLabel('shell') : existing.label,
@@ -723,24 +739,66 @@ function applyPiWebEvent(items: TimelineItem[], event: PiWebSessionEvent): Timel
   }
   if (event.type === 'command.output' || event.type === 'session.error') {
     const message = event.type === 'session.error' ? friendlyAgSwarmError(event.message) : event.message;
-    return [...items, {
+    return compactTimelineItems([...items, {
       kind: 'activity',
       id: `activity-${crypto.randomUUID()}`,
       label: event.type === 'session.error' ? 'Ag is unavailable' : message,
       detail: event.type === 'session.error' ? message : undefined,
       tone: event.type === 'session.error' || event.level === 'error' ? 'error' : 'neutral',
       createdAt: now,
-    }];
+    }]);
   }
   if (event.type === 'message.end') {
     if (event.message === undefined) return closeRunningReasoning(items);
-    return collapseCompletedTools(mergeFinalAssistantMessage(closeRunningReasoning(items), messagesToTimeline([event.message])));
+    return compactTimelineItems(mergeFinalAssistantMessage(closeRunningReasoning(items), messagesToTimeline([event.message])));
   }
   return items;
 }
 
 function slashCommandName(value: string): string {
   return value.startsWith('/') ? value.slice(1) : value;
+}
+
+function withAgSwarmRuntimeContext(
+  text: string,
+  context: {
+    devices: Device[];
+    deviceStatusMessage: string;
+    localNodeId: string;
+    localDeviceLabel: string;
+  },
+): string {
+  const devices = context.devices.map(device => ({
+    id: device.id,
+    name: device.name,
+    status: device.status,
+    type: device.type,
+    os: device.os,
+    endpoint: device.ipAddress || null,
+    isLocal: device.id === context.localNodeId,
+    capabilities: device.backgroundTasks || [],
+    activeTask: device.activeTask || null,
+  }));
+  const onlineCount = devices.filter(device => device.status === 'online' || device.status === 'idle' || device.status === 'transferring').length;
+  return [
+    '<agswarm_app_state trusted="true">',
+    'This state is provided by the AgSwarm desktop app UI. Prefer it for questions about devices, tasks, sessions, settings, and the current client state. Do not inspect source code or run shell commands just to answer these app-state questions.',
+    JSON.stringify({
+      currentClient: {
+        nodeId: context.localNodeId,
+        name: context.localDeviceLabel,
+      },
+      devicePage: {
+        statusMessage: context.deviceStatusMessage,
+        visibleDeviceCount: context.devices.length,
+        onlineOrIdleDeviceCount: onlineCount,
+        devices,
+      },
+    }, null, 2),
+    '</agswarm_app_state>',
+    '',
+    text,
+  ].join('\n');
 }
 
 function Markdown({ text }: { text: string }) {
@@ -758,13 +816,19 @@ function messageToTimeline(message: unknown, index: number): TimelineItem[] {
   if (role === 'assistant' || role === 'user') {
     const createdAt = new Date(index).toISOString();
     const parts = messageContentParts(record);
-    const text = parts.text.join('\n').trim();
+    const text = stripAgSwarmRuntimeContext(parts.text.join('\n')).trim();
     const reasoning = parts.thinking.join('\n').trim();
-    const timeline = [
+    const timeline: Array<TimelineMessage | TimelineReasoning | TimelineTool | null> = [
       reasoning ? { kind: 'reasoning', id: String(record.id || `${role}-${index}-reasoning`), text: reasoning, status: 'complete', createdAt } as TimelineReasoning : null,
+      ...parts.tools.map((tool, toolIndex) => ({
+        ...tool,
+        id: tool.id || `tool-${index}-${toolIndex}`,
+        callId: tool.callId || `${index}-${toolIndex}`,
+        createdAt,
+      })),
       text ? { kind: 'message', id: String(record.id || `${role}-${index}`), role, text, createdAt } as TimelineMessage : null,
     ];
-    return timeline.filter((item): item is TimelineMessage | TimelineReasoning => item !== null);
+    return timeline.filter((item): item is TimelineMessage | TimelineReasoning | TimelineTool => item !== null);
   }
   if (role === 'toolResult') {
     return [{
@@ -778,21 +842,124 @@ function messageToTimeline(message: unknown, index: number): TimelineItem[] {
       createdAt: new Date(index).toISOString(),
     }];
   }
-  const text = messageContentParts(record).text.join('\n').trim();
+  const text = stripAgSwarmRuntimeContext(messageContentParts(record).text.join('\n')).trim();
   return text ? [{ kind: 'activity', id: `message-${index}`, label: text, createdAt: new Date(index).toISOString() }] : [];
 }
 
-function messageContentParts(record: Record<string, unknown>): { text: string[]; thinking: string[] } {
-  const content = record.content;
-  if (typeof content === 'string') return { text: [content], thinking: [] };
-  if (!Array.isArray(content)) return { text: [], thinking: [] };
-  return content.reduce<{ text: string[]; thinking: string[] }>((parts, part) => {
+function stripAgSwarmRuntimeContext(value: string): string {
+  return value.replace(/<agswarm_app_state\b[^>]*>[\s\S]*?<\/agswarm_app_state>/gi, '').trim();
+}
+
+function compactTimelineItems(items: TimelineItem[]): TimelineItem[] {
+  const withoutDuplicateAdjacentMessages = items.filter((item, index, list) => {
+    if (item.kind !== 'message') return true;
+    const previous = list[index - 1];
+    return !(previous?.kind === 'message'
+      && previous.role === item.role
+      && normalizeComparableText(previous.text) === normalizeComparableText(item.text));
+  });
+  const result: TimelineItem[] = [];
+  let pendingTools: TimelineTool[] = [];
+
+  const flushTools = () => {
+    if (!pendingTools.length) return;
+    if (pendingTools.length === 1 && pendingTools[0].status === 'running') {
+      result.push(pendingTools[0]);
+    } else {
+      result.push(groupTools(pendingTools));
+    }
+    pendingTools = [];
+  };
+
+  for (const item of withoutDuplicateAdjacentMessages) {
+    if (item.kind === 'tool') {
+      pendingTools.push(item);
+      if (item.status === 'running') flushTools();
+      continue;
+    }
+    if (item.kind === 'toolGroup') {
+      pendingTools.push(...item.tools);
+      continue;
+    }
+    flushTools();
+    if (item.kind === 'reasoning') {
+      const previous = result[result.length - 1];
+      if (previous?.kind === 'reasoning') {
+        result[result.length - 1] = {
+          ...previous,
+          text: mergeReasoningText(previous.text, item.text),
+          status: previous.status === 'running' || item.status === 'running' ? 'running' : 'complete',
+        };
+        continue;
+      }
+    }
+    result.push(item);
+  }
+  flushTools();
+  return result;
+}
+
+function groupTools(tools: TimelineTool[]): TimelineToolGroup {
+  const running = tools.find(tool => tool.status === 'running');
+  const errored = tools.filter(tool => tool.status === 'error');
+  const createdAt = tools[0]?.createdAt || new Date().toISOString();
+  const groupedNames = Array.from(new Set(tools.map(tool => tool.toolName || 'tool')));
+  const label = running
+    ? running.label
+    : errored.length
+      ? `${errored.length} tool ${errored.length === 1 ? 'call failed' : 'calls failed'}`
+      : `已调用 ${tools.length} 个工具`;
+  return {
+    kind: 'toolGroup',
+    id: `tools-${tools.map(tool => tool.callId).join('-')}`,
+    callId: `tools-${tools.map(tool => tool.callId).join('-')}`,
+    label,
+    tools: [...tools],
+    createdAt,
+  };
+}
+
+function normalizeComparableText(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function mergeReasoningText(left: string, right: string): string {
+  if (!left.trim()) return right;
+  if (!right.trim()) return left;
+  if (left.includes(right)) return left;
+  if (right.includes(left)) return right;
+  return `${left}\n${right}`;
+}
+
+function messageContentParts(record: Record<string, unknown>): { text: string[]; thinking: string[]; tools: TimelineTool[] } {
+  const content = Array.isArray(record.parts) ? record.parts : record.content;
+  if (typeof content === 'string') return { text: [content], thinking: [], tools: [] };
+  if (!Array.isArray(content)) return { text: [], thinking: [], tools: [] };
+  return content.reduce<{ text: string[]; thinking: string[]; tools: TimelineTool[] }>((parts, part, index) => {
     if (typeof part === 'string') {
       parts.text.push(part);
       return parts;
     }
     if (!part || typeof part !== 'object') return parts;
     const recordPart = part as Record<string, unknown>;
+    if (recordPart.type === 'toolExecution') {
+      const toolName = String(recordPart.toolName || 'tool');
+      const status = toolExecutionStatus(recordPart.status);
+      parts.tools.push({
+        kind: 'tool',
+        id: `tool-${String(recordPart.toolCallId || index)}`,
+        callId: String(recordPart.toolCallId || index),
+        toolName,
+        label: status === 'running'
+          ? runningToolLabel(toolName, recordPart.args, String(recordPart.summary || ''))
+          : completedToolLabel(toolName),
+        status,
+        input: recordPart.args,
+        output: recordPart.content ?? recordPart.resultText ?? recordPart.details,
+        createdAt: new Date(index).toISOString(),
+      });
+      return parts;
+    }
     const text = typeof recordPart.text === 'string' ? recordPart.text : '';
     if (!text) return parts;
     if (recordPart.type === 'thinking') parts.thinking.push(text);
@@ -801,7 +968,13 @@ function messageContentParts(record: Record<string, unknown>): { text: string[];
       if (phase !== 'commentary') parts.text.push(text);
     }
     return parts;
-  }, { text: [], thinking: [] });
+  }, { text: [], thinking: [], tools: [] });
+}
+
+function toolExecutionStatus(value: unknown): TimelineTool['status'] {
+  if (value === 'running' || value === 'pending') return 'running';
+  if (value === 'error' || value === 'failed') return 'error';
+  return 'success';
 }
 
 function textSignaturePhase(value: unknown): string {
@@ -904,9 +1077,10 @@ function mergeTimelineItems(left: TimelineItem[], right: TimelineItem[]): Timeli
 
 function mergeAppendedMessage(left: TimelineItem[], right: TimelineItem[]): TimelineItem[] {
   const userMessage = right.find(item => item.kind === 'message' && item.role === 'user') as TimelineMessage | undefined;
-  if (!userMessage) return mergeTimelineItems(left, right);
+  const assistantMessage = right.find(item => item.kind === 'message' && item.role === 'assistant') as TimelineMessage | undefined;
   const withoutOptimisticDuplicate = left.filter(item => (
-    !(item.kind === 'message' && item.role === 'user' && item.id.startsWith('user-') && item.text === userMessage.text)
+    !(userMessage && item.kind === 'message' && item.role === 'user' && item.id.startsWith('user-') && normalizeComparableText(item.text) === normalizeComparableText(userMessage.text))
+    && !(assistantMessage && item.kind === 'message' && item.role === 'assistant' && item.id.startsWith('assistant-stream-'))
   ));
   return mergeTimelineItems(withoutOptimisticDuplicate, right);
 }
