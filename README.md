@@ -153,12 +153,17 @@ git push origin v0.2.0
 
 产物说明：
 
-1. macOS：默认仅发布 `AgSwarm-macos-arm64.dmg`（Apple Silicon, M1/M2/M3）
-   - Intel Mac 如需安装包，建议在 Intel runner 或本地单独构建
-2. Windows：`AgSwarm-windows-x64.zip`
-3. 校验文件：`SHA256SUMS.txt`
+1. macOS Apple Silicon：Tauri `.app.zip` / `.dmg`
+2. macOS Intel：Tauri `.app.zip` / `.dmg`
+3. Windows x64：Tauri NSIS `.exe` / MSI `.msi`（以 Tauri 当前产物为准）
+4. Linux x64：Tauri AppImage / deb / rpm（以 Tauri 当前产物为准）
+5. 校验文件：`SHA256SUMS.txt`
+
+发布流水线会在每个平台 runner 上自动准备对应的 Node runtime sidecar
+与 pi AgentSession bridge sidecar；缺失时对应平台构建会失败，不会回退到
+绕过 pi 的 provider 或 Python bridge。
 
 获取路径：
 
 1. GitHub 仓库 `Releases` 页面
-2. 对应 tag 的 Assets 下载 `.dmg`
+2. 对应 tag 的 Assets 下载目标平台安装包

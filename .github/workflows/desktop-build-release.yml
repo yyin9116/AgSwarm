@@ -1,104 +1,220 @@
 name: agswarm-desktop-release
 
 on:
-  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/desktop-build-release.yml"
+      - "desktop/**"
+      - "assets/icons/**"
   push:
+    branches:
+      - main
+      - "codex/**"
     tags:
       - "v*"
+    paths:
+      - ".github/workflows/desktop-build-release.yml"
+      - "desktop/**"
+      - "assets/icons/**"
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+env:
+  NODE_VERSION: "22.19.0"
+  BUN_VERSION: "1.3.4"
+  PI_REPOSITORY: earendil-works/pi
+
 jobs:
+  ci:
+    name: Desktop CI
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout AgSwarm
+        uses: actions/checkout@v4
+        with:
+          path: AgSwarm
+
+      - name: Checkout pi SDK
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PI_REPOSITORY }}
+          path: pi
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            AgSwarm/desktop/package-lock.json
+            pi/package-lock.json
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            curl \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            pkg-config
+
+      - name: Install pi SDK dependencies
+        working-directory: pi
+        run: npm ci
+
+      - name: Build pi SDK packages
+        working-directory: pi
+        run: npm run build
+
+      - name: Install desktop dependencies
+        working-directory: AgSwarm/desktop
+        run: npm ci
+
+      - name: Typecheck desktop
+        working-directory: AgSwarm/desktop
+        run: npm run lint
+
+      - name: Build desktop frontend
+        working-directory: AgSwarm/desktop
+        run: npm run build
+
+      - name: Check Rust desktop crate
+        working-directory: AgSwarm/desktop/src-tauri
+        run: cargo check
+
   build:
-    name: Build (${{ matrix.target }})
+    name: Build ${{ matrix.label }}
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    needs: ci
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: windows-2022
-            target: windows-x64
-          - os: macos-15
-            target: macos-apple-silicon
+          - label: macOS Apple Silicon
+            os: macos-15
+            sidecar_target: aarch64-apple-darwin
+            tauri_args: --target aarch64-apple-darwin
+            artifact_name: agswarm-client-macos-aarch64
+          - label: macOS Intel
+            os: macos-13
+            sidecar_target: x86_64-apple-darwin
+            tauri_args: --target x86_64-apple-darwin
+            artifact_name: agswarm-client-macos-x86_64
+          - label: Windows x64
+            os: windows-2022
+            sidecar_target: x86_64-pc-windows-msvc
+            tauri_args: ""
+            artifact_name: agswarm-client-windows-x86_64
+          - label: Linux x64
+            os: ubuntu-24.04
+            sidecar_target: x86_64-unknown-linux-gnu
+            tauri_args: ""
+            artifact_name: agswarm-client-linux-x86_64
+
     runs-on: ${{ matrix.os }}
-    env:
-      APP_NAME: AgSwarm
-
     steps:
-      - name: Checkout
+      - name: Checkout AgSwarm
         uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          path: AgSwarm
 
-      - name: Install dependencies
+      - name: Checkout pi SDK
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.PI_REPOSITORY }}
+          path: pi
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            AgSwarm/desktop/package-lock.json
+            pi/package-lock.json
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[desktop,nats,desktop-build]"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            curl \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            pkg-config
 
-      - name: Install create-dmg (macOS)
+      - name: Install Rust target for macOS cross-arch
         if: runner.os == 'macOS'
-        run: brew install create-dmg
+        run: rustup target add ${{ matrix.sidecar_target }}
 
-      - name: Prepare icon compatibility path
-        shell: python
-        run: |
-          from pathlib import Path
-          import shutil
-          root = Path(".").resolve()
-          src = root / "assets" / "icons" / "app-icon.png"
-          dst = root / "prototype" / "assets" / "agswarm-icon.png"
-          if src.exists():
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(src, dst)
-            print(f"icon-compat: {src} -> {dst}")
-          else:
-            print(f"icon-compat: source icon missing, skip copy: {src}")
+      - name: Install pi SDK dependencies
+        working-directory: pi
+        run: npm ci
 
-      - name: Build desktop package (Windows zip)
-        if: runner.os == 'Windows'
-        run: python scripts/build_desktop.py --clean --name ${{ env.APP_NAME }}
+      - name: Build pi SDK packages
+        working-directory: pi
+        run: npm run build
 
-      - name: Build desktop package (macOS arm64 dmg only)
-        if: runner.os == 'macOS'
-        run: python scripts/build_desktop.py --clean --name ${{ env.APP_NAME }} --dmg --no-zip
+      - name: Install desktop dependencies
+        working-directory: AgSwarm/desktop
+        run: npm ci
 
-      - name: Generate checksums (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $out = "dist-artifacts/SHA256SUMS.txt"
-          Remove-Item $out -ErrorAction SilentlyContinue
-          Get-ChildItem dist-artifacts -File | ForEach-Object {
-            $hash = Get-FileHash $_.FullName -Algorithm SHA256
-            "$($hash.Hash.ToLower())  $($_.Name)" | Out-File -FilePath $out -Encoding utf8 -Append
-          }
+      - name: Prepare Tauri sidecars
+        working-directory: AgSwarm/desktop
+        env:
+          TAURI_SIDECAR_TARGET: ${{ matrix.sidecar_target }}
+          NODE_VERSION: ${{ env.NODE_VERSION }}
+        run: npm run prepare:sidecars -- --target ${{ matrix.sidecar_target }} --force
 
-      - name: Generate checksums (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          cd dist-artifacts
-          shasum -a 256 * > SHA256SUMS.txt
+      - name: Check prepared sidecars
+        working-directory: AgSwarm/desktop
+        env:
+          TAURI_SIDECAR_TARGET: ${{ matrix.sidecar_target }}
+        run: npm run check:sidecars -- --target ${{ matrix.sidecar_target }}
 
-      - name: Upload build artifact
+      - name: Build Tauri bundle
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIDECAR_TARGET: ${{ matrix.sidecar_target }}
+          APPLE_SIGNING_IDENTITY: "-"
+        with:
+          projectPath: AgSwarm/desktop
+          args: ${{ matrix.tauri_args }}
+
+      - name: Collect bundle artifacts
+        working-directory: AgSwarm/desktop
+        env:
+          TAURI_SIDECAR_TARGET: ${{ matrix.sidecar_target }}
+        run: npm run collect:artifacts -- --target ${{ matrix.sidecar_target }} --label ${{ matrix.artifact_name }}
+
+      - name: Upload bundle artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.APP_NAME }}-${{ matrix.os }}
-          path: |
-            dist-artifacts/*.zip
-            dist-artifacts/*.dmg
-            dist-artifacts/SHA256SUMS.txt
+          name: ${{ matrix.artifact_name }}
+          path: AgSwarm/dist-artifacts/*
           if-no-files-found: error
 
   release:
-    name: Publish Release
+    name: Publish GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - name: Checkout (for release notes)
+      - name: Checkout release notes
         uses: actions/checkout@v4
 
       - name: Download artifacts
@@ -107,7 +223,12 @@ jobs:
           path: release-assets
 
       - name: Display assets
-        run: ls -R release-assets
+        run: find release-assets -maxdepth 4 -type f | sort
+
+      - name: Generate checksums
+        run: |
+          cd release-assets
+          find . -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
 
       - name: Check custom release notes
         id: notes
@@ -120,20 +241,32 @@ jobs:
             echo "use_custom=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Publish GitHub Release (custom notes)
+      - name: Publish GitHub Release with custom notes
         if: steps.notes.outputs.use_custom == 'true'
         uses: softprops/action-gh-release@v2
         with:
+          body_path: docs/releases/${{ github.ref_name }}.md
           files: |
             release-assets/**/*.zip
             release-assets/**/*.dmg
-          body_path: docs/releases/${{ github.ref_name }}.md
+            release-assets/**/*.exe
+            release-assets/**/*.msi
+            release-assets/**/*.AppImage
+            release-assets/**/*.deb
+            release-assets/**/*.rpm
+            release-assets/SHA256SUMS.txt
 
-      - name: Publish GitHub Release (auto notes)
+      - name: Publish GitHub Release with generated notes
         if: steps.notes.outputs.use_custom != 'true'
         uses: softprops/action-gh-release@v2
         with:
+          generate_release_notes: true
           files: |
             release-assets/**/*.zip
             release-assets/**/*.dmg
-          generate_release_notes: true
+            release-assets/**/*.exe
+            release-assets/**/*.msi
+            release-assets/**/*.AppImage
+            release-assets/**/*.deb
+            release-assets/**/*.rpm
+            release-assets/SHA256SUMS.txt

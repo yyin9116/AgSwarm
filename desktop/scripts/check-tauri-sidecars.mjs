@@ -16,9 +16,11 @@ const SUPPORTED_TARGETS = [
 ];
 
 const args = new Set(process.argv.slice(2));
+const targetArg = readArg(process.argv.slice(2), '--target') || process.env.TAURI_SIDECAR_TARGET;
 const checkAll = args.has('--all');
 const current = SUPPORTED_TARGETS.find(target => target.platform === os.platform() && target.arch === os.arch());
-const targets = checkAll ? SUPPORTED_TARGETS : current ? [current] : [];
+const explicitTarget = targetArg ? SUPPORTED_TARGETS.find(target => target.triple === targetArg) : undefined;
+const targets = checkAll ? SUPPORTED_TARGETS : explicitTarget ? [explicitTarget] : current ? [current] : [];
 
 if (!targets.length) {
   console.error(`Unsupported sidecar validation target: ${os.platform()} ${os.arch()}`);
@@ -54,3 +56,10 @@ if (missing.length) {
 
 const targetLabel = checkAll ? 'all configured desktop targets' : targets[0].label;
 console.log(`Sidecar check passed for ${targetLabel}.`);
+
+function readArg(values, name) {
+  const index = values.indexOf(name);
+  if (index === -1) return '';
+  const value = values[index + 1];
+  return value && !value.startsWith('--') ? value : '';
+}

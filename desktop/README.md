@@ -34,6 +34,15 @@ sidecars are build failures rather than provider/Python fallbacks.
 
 ## Platform Sidecars
 
+GitHub Actions prepares the desktop sidecars automatically for each release
+matrix target before running Tauri. For local packaging, prepare the current
+machine first:
+
+```bash
+npm run prepare:sidecars -- --force
+npm run check:sidecars
+```
+
 Current desktop targets expect these executable files under
 `src-tauri/binaries/`:
 

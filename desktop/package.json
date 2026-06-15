@@ -11,6 +11,8 @@
     "tauri:build": "tauri build",
     "check:sidecars": "node scripts/check-tauri-sidecars.mjs",
     "check:sidecars:all": "node scripts/check-tauri-sidecars.mjs --all",
+    "prepare:sidecars": "node scripts/prepare-tauri-sidecars.mjs",
+    "collect:artifacts": "node scripts/collect-tauri-artifacts.mjs",
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
