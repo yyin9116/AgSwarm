@@ -51,6 +51,11 @@ jobs:
             AgSwarm/desktop/package-lock.json
             pi/package-lock.json
 
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
