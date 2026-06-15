@@ -1,8 +1,26 @@
-import { Play, Moon, Sun, Key, Folder, BrainCircuit, Cpu, Save, CheckCircle2, Radar } from 'lucide-react';
 import { useState } from 'react';
+import type { ReactNode } from 'react';
+import {
+  Badge,
+  Box,
+  Button,
+  Card,
+  Group,
+  PasswordInput,
+  Select,
+  Stack,
+  Switch,
+  Text,
+  TextInput,
+  Textarea,
+  ThemeIcon,
+} from '@mantine/core';
+import { notifications } from '@mantine/notifications';
+import { Activity, Bot, BrainCircuit, CheckCircle2, Cpu, FileCode, Folder, Key, Moon, Power, Radar, RefreshCw, Save, Sun, UserRound } from 'lucide-react';
+import type { DeviceAliasSettings } from '../lib/settingsStore';
+import type { LocalPeerStatus } from '../types/agswarm';
 
 interface SettingsViewProps {
-  onSimulateIncoming: () => void;
   theme: 'light' | 'dark';
   onThemeChange: (theme: 'light' | 'dark') => void;
   providerUrl: string;
@@ -11,10 +29,37 @@ interface SettingsViewProps {
   onApiKeyChange: (value: string) => void;
   modelName: string;
   onModelNameChange: (value: string) => void;
+  natsUrl: string;
+  onNatsUrlChange: (value: string) => void;
+  nodeId: string;
+  onNodeIdChange: (value: string) => void;
+  deviceLabel: string;
+  onDeviceLabelChange: (value: string) => void;
+  userDisplayName: string;
+  onUserDisplayNameChange: (value: string) => void;
+  userAvatarSeed: string;
+  onUserAvatarSeedChange: (value: string) => void;
+  agDisplayName: string;
+  onAgDisplayNameChange: (value: string) => void;
+  agAvatarSeed: string;
+  onAgAvatarSeedChange: (value: string) => void;
+  deviceAliases: Record<string, DeviceAliasSettings>;
+  onDeviceAliasesChange: (value: Record<string, DeviceAliasSettings>) => void;
+  enablePi: boolean;
+  onEnablePiChange: (value: boolean) => void;
+  localPeerStatus: LocalPeerStatus | null;
+  onRestartLocalPeer: () => Promise<void>;
+  latexMcpDir: string;
+  onLatexMcpDirChange: (value: string) => void;
+  piCwd: string;
+  onPiCwdChange: (value: string) => void;
+  defaultSavePath: string;
+  onDefaultSavePathChange: (value: string) => void;
+  agentSkills: string;
+  onAgentSkillsChange: (value: string) => void;
 }
 
 export function SettingsView({
-  onSimulateIncoming,
   theme,
   onThemeChange,
   providerUrl,
@@ -23,189 +68,240 @@ export function SettingsView({
   onApiKeyChange,
   modelName,
   onModelNameChange,
+  natsUrl,
+  onNatsUrlChange,
+  nodeId,
+  onNodeIdChange,
+  deviceLabel,
+  onDeviceLabelChange,
+  userDisplayName,
+  onUserDisplayNameChange,
+  userAvatarSeed,
+  onUserAvatarSeedChange,
+  agDisplayName,
+  onAgDisplayNameChange,
+  agAvatarSeed,
+  onAgAvatarSeedChange,
+  deviceAliases,
+  onDeviceAliasesChange,
+  enablePi,
+  onEnablePiChange,
+  localPeerStatus,
+  onRestartLocalPeer,
+  latexMcpDir,
+  onLatexMcpDirChange,
+  piCwd,
+  onPiCwdChange,
+  defaultSavePath,
+  onDefaultSavePathChange,
+  agentSkills,
+  onAgentSkillsChange,
 }: SettingsViewProps) {
-  const [defaultPath, setDefaultPath] = useState('~/Downloads/AgentTasks');
-  const [agentSkills, setAgentSkills] = useState('safe_default, file_system, shell');
-  const [isSaved, setIsSaved] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isRestartingPeer, setIsRestartingPeer] = useState(false);
 
-  const handleSave = () => {
-    setIsSaved(true);
-    setTimeout(() => setIsSaved(false), 2000);
+  const restartPeer = async (showNotification: boolean) => {
+    setIsRestartingPeer(true);
+    try {
+      await onRestartLocalPeer();
+      if (showNotification) notifications.show({ color: 'teal', title: 'Local node restarted', message: 'Settings have been applied.' });
+    } catch (error) {
+      notifications.show({ color: 'red', title: 'Restart failed', message: formatError(error) });
+      throw error;
+    } finally {
+      setIsRestartingPeer(false);
+    }
+  };
+
+  const handleSave = async () => {
+    setIsSaving(true);
+    try {
+      await restartPeer(false);
+      notifications.show({ color: 'teal', title: 'Settings saved', message: 'Local peer settings were applied.' });
+    } catch (error) {
+      notifications.show({ color: 'red', title: 'Settings not saved', message: formatError(error) });
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   return (
-    <div className="p-6 max-w-3xl mx-auto pt-12 pb-32">
-      <div className="flex items-center justify-between mb-8">
-        <h1 className="text-3xl font-semibold tracking-tight dark:text-white">Settings</h1>
-        <button 
-          onClick={handleSave}
-          className="flex items-center gap-2 bg-teal-600 hover:bg-teal-700 text-white px-5 py-2.5 rounded-xl text-sm font-medium transition-all shadow-sm shadow-teal-600/20"
-        >
-          {isSaved ? <CheckCircle2 className="w-4 h-4" /> : <Save className="w-4 h-4" />}
-          {isSaved ? 'Saved!' : 'Save Changes'}
-        </button>
-      </div>
-      
-      <div className="space-y-6">
-        {/* General Settings */}
-        <div className="bg-white dark:bg-gray-900 rounded-3xl shadow-sm border border-gray-100 dark:border-gray-800 overflow-hidden">
-          <div className="p-5 border-b border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/50">
-            <h2 className="font-semibold text-gray-900 dark:text-white flex items-center gap-2">
-              <Sun className="w-4 h-4 text-gray-500" /> General
-            </h2>
-          </div>
-          <div className="p-5 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between">
-            <div>
-              <h3 className="font-medium text-gray-900 dark:text-gray-100">Appearance</h3>
-              <p className="text-sm text-gray-500 dark:text-gray-400">Toggle dark mode</p>
-            </div>
-            <div className="flex items-center bg-gray-100 dark:bg-gray-800 rounded-xl p-1">
-              <button
-                onClick={() => onThemeChange('light')}
-                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-                  theme === 'light' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-300'
-                }`}
-              >
-                <Sun className="w-4 h-4" /> Light
-              </button>
-              <button
-                onClick={() => onThemeChange('dark')}
-                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-                  theme === 'dark' ? 'bg-gray-700 text-white shadow-sm' : 'text-gray-500 hover:text-gray-700'
-                }`}
-              >
-                <Moon className="w-4 h-4" /> Dark
-              </button>
-            </div>
-          </div>
-          <div className="p-5 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between">
-            <div>
-              <h3 className="font-medium text-gray-900 dark:text-gray-100">Device Name</h3>
-              <p className="text-sm text-gray-500 dark:text-gray-400">How you appear to others</p>
-            </div>
-            <input 
-              type="text" 
-              defaultValue="My Desktop"
-              className="bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white text-sm rounded-xl px-4 py-2 focus:outline-none focus:ring-2 focus:ring-teal-500 w-48 text-right font-medium"
-            />
-          </div>
-          <div className="p-5 flex items-center justify-between">
-            <div>
-              <h3 className="font-medium text-gray-900 dark:text-gray-100">Default Save Path</h3>
-              <p className="text-sm text-gray-500 dark:text-gray-400">Where received files are saved</p>
-            </div>
-            <div className="flex items-center gap-2 w-64">
-              <Folder className="w-4 h-4 text-gray-400 absolute ml-3 pointer-events-none" />
-              <input 
-                type="text" 
-                value={defaultPath}
-                onChange={(e) => setDefaultPath(e.target.value)}
-                className="w-full bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white text-sm rounded-xl pl-9 pr-4 py-2 focus:outline-none focus:ring-2 focus:ring-teal-500 font-mono"
-              />
-            </div>
-          </div>
-        </div>
-
-        {/* AI & Agent Settings */}
-        <div className="bg-white dark:bg-gray-900 rounded-3xl shadow-sm border border-gray-100 dark:border-gray-800 overflow-hidden">
-          <div className="p-5 border-b border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/50">
-            <h2 className="font-semibold text-gray-900 dark:text-white flex items-center gap-2">
-              <BrainCircuit className="w-4 h-4 text-teal-500" /> AI & Agent Configuration
-            </h2>
-          </div>
-          <div className="p-5 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between">
-            <div className="pr-4">
-              <h3 className="font-medium text-gray-900 dark:text-gray-100">API Key</h3>
-              <p className="text-sm text-gray-500 dark:text-gray-400">Bearer key for the local OpenAI-compatible provider</p>
-            </div>
-            <div className="flex items-center gap-2 w-64 relative">
-              <Key className="w-4 h-4 text-gray-400 absolute ml-3 pointer-events-none" />
-              <input 
-                type="password" 
-                value={apiKey}
-                onChange={(e) => onApiKeyChange(e.target.value)}
-                placeholder="local-dev-key"
-                className="w-full bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white text-sm rounded-xl pl-9 pr-4 py-2 focus:outline-none focus:ring-2 focus:ring-teal-500 font-mono"
-              />
-            </div>
-          </div>
-          <div className="p-5 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between">
-            <div>
-              <h3 className="font-medium text-gray-900 dark:text-gray-100">Default Model</h3>
-              <p className="text-sm text-gray-500 dark:text-gray-400">Model used for reasoning</p>
-            </div>
-            <div className="relative w-64">
-              <Cpu className="w-4 h-4 text-gray-400 absolute ml-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-              <select 
-                value={modelName}
-                onChange={(e) => onModelNameChange(e.target.value)}
-                className="w-full bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white text-sm rounded-xl pl-9 pr-4 py-2 focus:outline-none focus:ring-2 focus:ring-teal-500 appearance-none cursor-pointer font-mono"
-              >
-                <option value="gpt-5.5">gpt-5.5</option>
-                <option value="gpt-5.4">gpt-5.4</option>
-                <option value="gpt-5.4-mini">gpt-5.4-mini</option>
-              </select>
-            </div>
-          </div>
-          <div className="p-5 flex items-start justify-between">
-            <div className="pr-4">
-              <h3 className="font-medium text-gray-900 dark:text-gray-100">Agent Skills</h3>
-              <p className="text-sm text-gray-500 dark:text-gray-400">Comma-separated list of allowed skills</p>
-            </div>
-            <textarea 
-              value={agentSkills}
-              onChange={(e) => setAgentSkills(e.target.value)}
-              className="w-64 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white text-sm rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-teal-500 font-mono resize-none h-20"
-            />
-          </div>
-        </div>
-
-        {/* Network Settings */}
-        <div className="bg-white dark:bg-gray-900 rounded-3xl shadow-sm border border-gray-100 dark:border-gray-800 overflow-hidden">
-          <div className="p-5 border-b border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-800/50">
-            <h2 className="font-semibold text-gray-900 dark:text-white flex items-center gap-2">
-              <Radar className="w-4 h-4 text-blue-500" /> Network
-            </h2>
-          </div>
-          <div className="p-5 flex items-center justify-between">
-            <div>
-              <h3 className="font-medium text-gray-900 dark:text-gray-100">Agent Provider</h3>
-              <p className="text-sm text-gray-500 dark:text-gray-400">Local OpenAI-compatible HTTP endpoint</p>
-            </div>
-            <input 
-              type="text" 
-              value={providerUrl}
-              onChange={(e) => onProviderUrlChange(e.target.value)}
-              placeholder="http://127.0.0.1:15721"
-              className="bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white text-sm rounded-xl px-4 py-2 focus:outline-none focus:ring-2 focus:ring-teal-500 w-64 font-mono"
-            />
-          </div>
-          <div className="p-5 border-t border-gray-100 dark:border-gray-800 flex items-center justify-between">
-            <div>
-              <h3 className="font-medium text-gray-900 dark:text-gray-100">NATS Server</h3>
-              <p className="text-sm text-gray-500 dark:text-gray-400">Control plane address</p>
-            </div>
-            <input
-              type="text"
-              defaultValue="nats://127.0.0.1:4222"
-              className="bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-white text-sm rounded-xl px-4 py-2 focus:outline-none focus:ring-2 focus:ring-teal-500 w-64 font-mono"
-            />
-          </div>
-        </div>
-
-        {/* Developer Tools */}
-        <div className="bg-indigo-50 dark:bg-indigo-900/20 rounded-3xl p-6 border border-indigo-100 dark:border-indigo-800/50">
-          <h3 className="font-medium text-indigo-900 dark:text-indigo-300 mb-2">Developer Tools</h3>
-          <p className="text-sm text-indigo-700 dark:text-indigo-400 mb-4">Simulate receiving a task from another device on the network to test the receiver UI.</p>
-          <button 
-            onClick={onSimulateIncoming}
-            className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-xl text-sm font-medium transition-colors"
+    <Box className="agswarm-settings-scroll">
+      <Stack maw={860} mx="auto" px="md" py="xl" pb={120} gap="lg">
+        <Group justify="space-between" align="center">
+          <Text fw={700} size="xl">Settings</Text>
+          <Button
+            color="teal"
+            leftSection={isSaving ? <RefreshCw size={16} className="animate-spin" /> : <Save size={16} />}
+            onClick={handleSave}
+            loading={isSaving}
           >
-            <Play className="w-4 h-4" />
-            Simulate Incoming Task
-          </button>
-        </div>
-      </div>
-    </div>
+            Save Changes
+          </Button>
+        </Group>
+
+        <SettingsCard icon={<UserRound size={16} />} title="Profile">
+          <TextInput
+            label="Your Name"
+            description="Name shown on your own chat bubbles"
+            value={userDisplayName}
+            onChange={(event) => onUserDisplayNameChange(event.currentTarget.value)}
+          />
+          <TextInput
+            label="Your Avatar Seed"
+            description="Initials or words used to generate your avatar"
+            value={userAvatarSeed}
+            onChange={(event) => onUserAvatarSeedChange(event.currentTarget.value)}
+          />
+          <TextInput
+            label="Ag Nickname"
+            description="Everyday name for AgSwarm AI in chat"
+            leftSection={<Bot size={16} />}
+            value={agDisplayName}
+            onChange={(event) => onAgDisplayNameChange(event.currentTarget.value)}
+          />
+          <TextInput
+            label="Ag Avatar Seed"
+            description="Initials or words used to generate Ag's avatar"
+            value={agAvatarSeed}
+            onChange={(event) => onAgAvatarSeedChange(event.currentTarget.value)}
+          />
+          <Textarea
+            label="Device Remarks"
+            description="Persistent remarks for discovered devices. Use one node id per line: node-id = display name | avatar seed"
+            autosize
+            minRows={3}
+            value={deviceAliasesToText(deviceAliases)}
+            onChange={(event) => onDeviceAliasesChange(deviceAliasesFromText(event.currentTarget.value))}
+          />
+        </SettingsCard>
+
+        <SettingsCard icon={<Sun size={16} />} title="General">
+          <Group justify="space-between" align="center">
+            <div>
+              <Text fw={600}>Appearance</Text>
+              <Text c="dimmed" size="sm">Toggle dark mode</Text>
+            </div>
+            <Select
+              value={theme}
+              onChange={(value) => onThemeChange(value === 'dark' ? 'dark' : 'light')}
+              data={[
+                { value: 'light', label: 'Light' },
+                { value: 'dark', label: 'Dark' },
+              ]}
+              leftSection={theme === 'dark' ? <Moon size={16} /> : <Sun size={16} />}
+              w={180}
+            />
+          </Group>
+          <TextInput label="Device Name" description="How you appear to others on the local network" value={deviceLabel} onChange={(event) => onDeviceLabelChange(event.currentTarget.value)} />
+          <TextInput label="Default Save Path" leftSection={<Folder size={16} />} value={defaultSavePath} onChange={(event) => onDefaultSavePathChange(event.currentTarget.value)} />
+        </SettingsCard>
+
+        <SettingsCard icon={<BrainCircuit size={16} />} title="AI & Agent Configuration">
+          <PasswordInput label="API Key" description="Bearer key for the local OpenAI-compatible provider" leftSection={<Key size={16} />} value={apiKey} onChange={(event) => onApiKeyChange(event.currentTarget.value)} />
+          <Select
+            label="Default Model"
+            description="Model used for reasoning"
+            leftSection={<Cpu size={16} />}
+            value={modelName}
+            onChange={(value) => onModelNameChange(value || 'gpt-5.5')}
+            data={['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini']}
+          />
+          <TextInput label="Host Working Directory" description="Base directory used by pi and local desktop tools. Leave empty to use the AgSwarm repo." leftSection={<Folder size={16} />} value={piCwd} onChange={(event) => onPiCwdChange(event.currentTarget.value)} />
+          <Textarea label="Agent Skills" description="Comma-separated list of allowed skills" autosize minRows={3} value={agentSkills} onChange={(event) => onAgentSkillsChange(event.currentTarget.value)} />
+        </SettingsCard>
+
+        <SettingsCard icon={<Power size={16} />} title="Local Agent Node" rightSection={<Badge color={localPeerStatus?.nodeRunning ? 'green' : 'red'} variant="light">{localPeerStatus?.nodeRunning ? 'Running' : 'Stopped'}</Badge>}>
+          <TextInput label="Local Node ID" description="Unique identity for this installed client" value={nodeId} onChange={(event) => onNodeIdChange(event.currentTarget.value)} />
+          <Switch
+            label="pi Agent Harness"
+            description="Expose earendil-works/pi tasks on this client"
+            checked={enablePi}
+            onChange={(event) => onEnablePiChange(event.currentTarget.checked)}
+            color="teal"
+          />
+          <Group justify="space-between" align="center" wrap="nowrap">
+            <div style={{ minWidth: 0 }}>
+              <Group gap="xs">
+                <Activity size={16} />
+                <Text fw={600}>Runtime Status</Text>
+              </Group>
+              <Text c="dimmed" size="sm" truncate>{localPeerStatus?.message || 'Starting local peer...'}</Text>
+              <Text c="dimmed" size="xs" ff="monospace">NATS: {localPeerStatus?.natsManaged ? 'managed local' : 'external or already running'}</Text>
+            </div>
+            <Button
+              variant="light"
+              color="teal"
+              leftSection={<RefreshCw size={16} className={isRestartingPeer ? 'animate-spin' : ''} />}
+              onClick={() => restartPeer(true)}
+              loading={isRestartingPeer}
+            >
+              Restart
+            </Button>
+          </Group>
+        </SettingsCard>
+
+        <SettingsCard icon={<Radar size={16} />} title="Network">
+          <TextInput label="Agent Provider" description="Local OpenAI-compatible HTTP endpoint" value={providerUrl} onChange={(event) => onProviderUrlChange(event.currentTarget.value)} />
+          <TextInput label="NATS Server" description="Control plane address" value={natsUrl} onChange={(event) => onNatsUrlChange(event.currentTarget.value)} />
+          <TextInput label="LaTeX MCP Dir" description="Required for live LaTeX compile tasks" leftSection={<FileCode size={16} />} value={latexMcpDir} onChange={(event) => onLatexMcpDirChange(event.currentTarget.value)} />
+        </SettingsCard>
+      </Stack>
+    </Box>
+  );
+}
+
+function deviceAliasesToText(aliases: Record<string, DeviceAliasSettings>): string {
+  return Object.entries(aliases)
+    .map(([nodeId, alias]) => {
+      const displayName = alias.displayName || '';
+      const avatarSeed = alias.avatarSeed || '';
+      return avatarSeed ? `${nodeId} = ${displayName} | ${avatarSeed}` : `${nodeId} = ${displayName}`;
+    })
+    .filter(Boolean)
+    .join('\n');
+}
+
+function deviceAliasesFromText(value: string): Record<string, DeviceAliasSettings> {
+  const aliases: Record<string, DeviceAliasSettings> = {};
+  for (const line of value.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const separator = trimmed.includes('=') ? '=' : ':';
+    const [nodeId, ...rest] = trimmed.split(separator);
+    const [displayName = '', avatarSeed = ''] = rest.join(separator).split('|').map(part => part.trim());
+    if (nodeId.trim() && (displayName || avatarSeed)) aliases[nodeId.trim()] = { displayName, avatarSeed };
+  }
+  return aliases;
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function SettingsCard({
+  icon,
+  title,
+  rightSection,
+  children,
+}: {
+  icon: ReactNode;
+  title: string;
+  rightSection?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <Card withBorder radius="md" p="lg">
+      <Stack gap="md">
+        <Group justify="space-between" align="center">
+          <Group gap="sm">
+            <ThemeIcon variant="light" color="teal">{icon}</ThemeIcon>
+            <Text fw={700}>{title}</Text>
+          </Group>
+          {rightSection}
+        </Group>
+        {children}
+      </Stack>
+    </Card>
   );
 }

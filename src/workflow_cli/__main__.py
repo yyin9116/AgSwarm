@@ -15,7 +15,7 @@ from workflow_discovery import (
 )
 from workflow_control_client import WorkflowControlClient
 from workflow_logging import setup_logging
-from workflow_node_daemon import NatsDaemonBridge, OpenClawNodeConfig, WorkflowNodeDaemon
+from workflow_node_daemon import NatsDaemonBridge, PeerNodeConfig, WorkflowNodeDaemon
 from workflow_runtime.adapters import LatexMcpAdapter, PiAdapter
 from workflow_runtime.adapters.base import Adapter
 from workflow_runtime.error_codes import build_error_summary
@@ -56,6 +56,13 @@ def _print_error_and_exit(exc: Exception, *, context: dict | None = None) -> Non
     raise SystemExit(2)
 
 
+def _print_stream_event(kind: str, payload: dict) -> None:
+    print(
+        json.dumps({"stream": True, "kind": kind, "payload": payload}, ensure_ascii=False),
+        flush=True,
+    )
+
+
 class EchoAdapter(Adapter):
     name = "echo"
 
@@ -91,27 +98,31 @@ def _build_runtime_adapters(args: argparse.Namespace) -> list[Adapter]:
     return adapters
 
 
-def _build_openclaw_config(args: argparse.Namespace) -> OpenClawNodeConfig:
-    capabilities = _parse_csv(args.openclaw_capabilities)
+def _arg_value(args: argparse.Namespace, name: str) -> str | None:
+    value = getattr(args, name, None)
+    if value not in (None, ""):
+        return value
+    return None
+
+
+def _build_peer_config(args: argparse.Namespace) -> PeerNodeConfig:
+    capabilities = _parse_csv(_arg_value(args, "peer_capabilities"))
     if args.enable_pi and "pi-agent" not in capabilities:
         capabilities.append("pi-agent")
-    return OpenClawNodeConfig(
-        transport=args.openclaw_transport,
-        endpoint=args.openclaw_endpoint or args.nats_url,
-        device_id=args.openclaw_device_id or args.node_id,
-        device_label=args.openclaw_device_label,
-        device_tags=_parse_csv(args.openclaw_device_tags),
+    return PeerNodeConfig(
+        transport=_arg_value(args, "peer_transport") or "nats",
+        endpoint=_arg_value(args, "peer_endpoint") or args.nats_url,
+        device_id=_arg_value(args, "peer_device_id") or args.node_id,
+        device_label=_arg_value(args, "peer_device_label"),
+        device_tags=_parse_csv(_arg_value(args, "peer_device_tags")),
         capabilities=capabilities,
-        gateway_command=args.openclaw_gateway_command,
-        gateway_cwd=args.openclaw_gateway_cwd,
-        gateway_timeout_sec=args.openclaw_gateway_timeout_sec,
     )
 
 
 def _build_pi_task(args: argparse.Namespace) -> TaskEnvelope:
     metadata: dict[str, object] = {
         "target_device": args.device_id or args.node_id,
-        "target_host_layer": "openclaw_node",
+        "target_host_layer": "agswarm_peer",
         "target_transport": "nats",
         "submission_channel": "workflow_cli.submit-pi",
     }
@@ -144,7 +155,7 @@ async def cmd_node(args: argparse.Namespace) -> None:
         runtime,
         max_concurrency=args.max_concurrency,
         default_retries=args.default_retries,
-        openclaw_config=_build_openclaw_config(args),
+        peer_config=_build_peer_config(args),
     )
     transport = NatsTransportProvider(server_url=args.nats_url)
     bridge = NatsDaemonBridge(
@@ -186,7 +197,7 @@ async def cmd_node(args: argparse.Namespace) -> None:
                 "pi_provider": args.pi_provider,
                 "pi_model": args.pi_model,
                 "pi_cwd": args.pi_cwd,
-                "openclaw_node": _build_openclaw_config(args).describe(adapters=runtime.adapter_names()),
+                "peer_node": _build_peer_config(args).describe(adapters=runtime.adapter_names()),
                 "skills_config": args.skills_config,
                 "discovery_enabled": discovery_enabled,
                 "discovery_port": int(args.discovery_port),
@@ -284,7 +295,7 @@ async def cmd_submit_pi(args: argparse.Namespace) -> None:
         target_node_id = args.node_id
         if args.device_id:
             try:
-                resolved = await client.resolve_openclaw_device_node(
+                resolved = await client.resolve_peer_device_node(
                     device_id=args.device_id,
                     timeout_sec=args.discovery_timeout_sec,
                     require_capabilities=["pi-agent"],
@@ -302,12 +313,20 @@ async def cmd_submit_pi(args: argparse.Namespace) -> None:
             if isinstance(resolved_node_id, str) and resolved_node_id:
                 target_node_id = resolved_node_id
                 task.metadata["resolved_node_id"] = target_node_id
+        async def _on_stream_event(event) -> None:
+            if args.stream_events:
+                _print_stream_event("event", event.to_dict())
+
         result = await client.run_task_and_wait(
             target_node_id=target_node_id,
             task=task,
             timeout_sec=args.wait_timeout_sec,
+            event_handler=_on_stream_event if args.stream_events else None,
         )
         result = _attach_error_summary(result)
+        if args.stream_events:
+            _print_stream_event("result", result)
+            return
         print(json.dumps(result, ensure_ascii=False, indent=2))
     finally:
         await client.close()
@@ -423,27 +442,49 @@ async def cmd_node_snapshot(args: argparse.Namespace) -> None:
         await client.close()
 
 
-async def _resolve_openclaw_target_node(args: argparse.Namespace, client: WorkflowControlClient) -> str:
+async def cmd_discover_nodes(args: argparse.Namespace) -> None:
+    client = await _with_client(args)
+    try:
+        nodes = await client.discover_peer_nodes(
+            timeout_sec=args.timeout_sec,
+            require_capabilities=_parse_csv(args.require_capabilities),
+        )
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "count": len(nodes),
+                    "nodes": nodes,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    finally:
+        await client.close()
+
+
+async def _resolve_peer_target_node(args: argparse.Namespace, client: WorkflowControlClient) -> str:
     target_node_id = args.node_id
     if args.device_id:
-        resolved = await client.resolve_openclaw_device_node(
+        resolved = await client.resolve_peer_device_node(
             device_id=args.device_id,
             timeout_sec=args.discovery_timeout_sec,
             require_capabilities=_parse_csv(args.require_capabilities),
         )
         resolved_node_id = resolved.get("node_id")
         if not isinstance(resolved_node_id, str) or not resolved_node_id:
-            raise LookupError(f"Resolved OpenClaw device has no node_id: {args.device_id}")
+            raise LookupError(f"Resolved peer device has no node_id: {args.device_id}")
         target_node_id = resolved_node_id
     return target_node_id
 
 
-async def cmd_openclaw_ping(args: argparse.Namespace) -> None:
+async def cmd_peer_ping(args: argparse.Namespace) -> None:
     client = await _with_client(args)
     try:
         try:
-            target_node_id = await _resolve_openclaw_target_node(args, client)
-            response = await client.request_openclaw_command(
+            target_node_id = await _resolve_peer_target_node(args, client)
+            response = await client.request_peer_command(
                 node_id=target_node_id,
                 command="ping",
                 payload={"device_id": args.device_id} if args.device_id else {},
@@ -453,7 +494,7 @@ async def cmd_openclaw_ping(args: argparse.Namespace) -> None:
             _print_error_and_exit(
                 exc,
                 context={
-                    "command": "openclaw-ping",
+                    "command": args.command,
                     "node_id": args.node_id,
                     "device_id": args.device_id,
                 },
@@ -472,15 +513,15 @@ def _parse_json_object(raw: str | None) -> dict:
     return data
 
 
-async def cmd_openclaw_command(args: argparse.Namespace) -> None:
+async def cmd_peer_command(args: argparse.Namespace) -> None:
     client = await _with_client(args)
     try:
         try:
             payload = _parse_json_object(args.payload)
-            target_node_id = await _resolve_openclaw_target_node(args, client)
-            response = await client.request_openclaw_command(
+            target_node_id = await _resolve_peer_target_node(args, client)
+            response = await client.request_peer_command(
                 node_id=target_node_id,
-                command=args.openclaw_command,
+                command=args.peer_command,
                 payload=payload,
                 timeout_sec=args.timeout_sec,
             )
@@ -488,10 +529,10 @@ async def cmd_openclaw_command(args: argparse.Namespace) -> None:
             _print_error_and_exit(
                 exc,
                 context={
-                    "command": "openclaw-command",
+                    "command": args.command,
                     "node_id": args.node_id,
                     "device_id": args.device_id,
-                    "openclaw_command": args.openclaw_command,
+                    "peer_command": args.peer_command,
                 },
             )
         print(json.dumps(response, ensure_ascii=False, indent=2))
@@ -555,7 +596,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.getenv("WORKFLOW_LOG_FILE"),
         help="Optional log file path for rotating logs.",
     )
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command", required=True, metavar="command")
 
     node = sub.add_parser("node", help="Run node daemon bridge")
     node.add_argument("--node-id", default="node-a")
@@ -569,26 +610,19 @@ def build_parser() -> argparse.ArgumentParser:
     node.add_argument("--pi-model", default=os.getenv("WORKFLOW_PI_MODEL"))
     node.add_argument("--pi-provider", default=os.getenv("WORKFLOW_PI_PROVIDER"))
     node.add_argument("--pi-cwd", default=os.getenv("WORKFLOW_PI_CWD"))
-    node.add_argument("--openclaw-transport", default=os.getenv("WORKFLOW_OPENCLAW_TRANSPORT", "nats"))
-    node.add_argument("--openclaw-endpoint", default=os.getenv("WORKFLOW_OPENCLAW_ENDPOINT"))
-    node.add_argument("--openclaw-device-id", default=os.getenv("WORKFLOW_OPENCLAW_DEVICE_ID"))
-    node.add_argument("--openclaw-device-label", default=os.getenv("WORKFLOW_OPENCLAW_DEVICE_LABEL"))
-    node.add_argument("--openclaw-gateway-command", default=os.getenv("WORKFLOW_OPENCLAW_GATEWAY_COMMAND"))
-    node.add_argument("--openclaw-gateway-cwd", default=os.getenv("WORKFLOW_OPENCLAW_GATEWAY_CWD"))
+    node.add_argument("--peer-transport", default=os.getenv("WORKFLOW_PEER_TRANSPORT", "nats"))
+    node.add_argument("--peer-endpoint", default=os.getenv("WORKFLOW_PEER_ENDPOINT"))
+    node.add_argument("--peer-device-id", default=os.getenv("WORKFLOW_PEER_DEVICE_ID"))
+    node.add_argument("--peer-device-label", default=os.getenv("WORKFLOW_PEER_DEVICE_LABEL"))
     node.add_argument(
-        "--openclaw-gateway-timeout-sec",
-        type=float,
-        default=float(os.getenv("WORKFLOW_OPENCLAW_GATEWAY_TIMEOUT_SEC", "30")),
+        "--peer-device-tags",
+        default=os.getenv("WORKFLOW_PEER_DEVICE_TAGS", ""),
+        help="Comma-separated peer tags for device discovery.",
     )
     node.add_argument(
-        "--openclaw-device-tags",
-        default=os.getenv("WORKFLOW_OPENCLAW_DEVICE_TAGS", ""),
-        help="Comma-separated OpenClaw node tags for device discovery.",
-    )
-    node.add_argument(
-        "--openclaw-capabilities",
-        default=os.getenv("WORKFLOW_OPENCLAW_CAPABILITIES", ""),
-        help="Comma-separated extra host capabilities exposed in node snapshot.",
+        "--peer-capabilities",
+        default=os.getenv("WORKFLOW_PEER_CAPABILITIES", ""),
+        help="Comma-separated extra peer capabilities exposed in node snapshot.",
     )
     node.add_argument(
         "--disable-discovery",
@@ -656,7 +690,7 @@ def build_parser() -> argparse.ArgumentParser:
     pi.add_argument(
         "--device-id",
         default=None,
-        help="Optional OpenClaw device id. When set, submit-pi discovers the matching pi-agent node before submitting.",
+        help="Optional peer device id. When set, submit-pi discovers the matching pi-agent node before submitting.",
     )
     pi.add_argument("--nats-url", default="nats://127.0.0.1:4222")
     pi.add_argument("--prompt", required=True)
@@ -669,6 +703,7 @@ def build_parser() -> argparse.ArgumentParser:
     pi.add_argument("--timeout-ms", type=int, default=120000)
     pi.add_argument("--wait-timeout-sec", type=float, default=120.0)
     pi.add_argument("--discovery-timeout-sec", type=float, default=1.0)
+    pi.add_argument("--stream-events", action="store_true", help="Emit task events as newline-delimited JSON while waiting.")
 
     upload = sub.add_parser("upload-file", help="Upload a file to node")
     upload.add_argument("--client-id", default="cli-client")
@@ -725,33 +760,43 @@ def build_parser() -> argparse.ArgumentParser:
     snap.add_argument("--nats-url", default="nats://127.0.0.1:4222")
     snap.add_argument("--timeout-sec", type=float, default=3.0)
 
-    openclaw_ping = sub.add_parser("openclaw-ping", help="Ping an OpenClaw host/device communication layer")
-    openclaw_ping.add_argument("--client-id", default="cli-client")
-    openclaw_ping.add_argument("--node-id", default="node-a")
-    openclaw_ping.add_argument("--device-id", default=None)
-    openclaw_ping.add_argument("--nats-url", default="nats://127.0.0.1:4222")
-    openclaw_ping.add_argument("--timeout-sec", type=float, default=3.0)
-    openclaw_ping.add_argument("--discovery-timeout-sec", type=float, default=1.0)
-    openclaw_ping.add_argument(
+    discover = sub.add_parser("discover-nodes", help="Discover online AgSwarm peer nodes from NATS status")
+    discover.add_argument("--client-id", default="cli-client")
+    discover.add_argument("--nats-url", default="nats://127.0.0.1:4222")
+    discover.add_argument("--timeout-sec", type=float, default=1.5)
+    discover.add_argument(
+        "--require-capabilities",
+        default="",
+        help="Comma-separated peer capabilities required in node status.",
+    )
+
+    peer_ping = sub.add_parser("peer-ping", help="Ping an AgSwarm peer node")
+    peer_ping.add_argument("--client-id", default="cli-client")
+    peer_ping.add_argument("--node-id", default="node-a")
+    peer_ping.add_argument("--device-id", default=None)
+    peer_ping.add_argument("--nats-url", default="nats://127.0.0.1:4222")
+    peer_ping.add_argument("--timeout-sec", type=float, default=3.0)
+    peer_ping.add_argument("--discovery-timeout-sec", type=float, default=1.0)
+    peer_ping.add_argument(
         "--require-capabilities",
         default="task-dispatch",
         help="Comma-separated capabilities required when resolving by --device-id.",
     )
 
-    openclaw_command = sub.add_parser("openclaw-command", help="Send an OpenClaw command to a host/device gateway")
-    openclaw_command.add_argument("--client-id", default="cli-client")
-    openclaw_command.add_argument("--node-id", default="node-a")
-    openclaw_command.add_argument("--device-id", default=None)
-    openclaw_command.add_argument("--nats-url", default="nats://127.0.0.1:4222")
-    openclaw_command.add_argument("--timeout-sec", type=float, default=30.0)
-    openclaw_command.add_argument("--discovery-timeout-sec", type=float, default=1.0)
-    openclaw_command.add_argument(
+    peer_command = sub.add_parser("peer-command", help="Send a lightweight command to an AgSwarm peer")
+    peer_command.add_argument("--client-id", default="cli-client")
+    peer_command.add_argument("--node-id", default="node-a")
+    peer_command.add_argument("--device-id", default=None)
+    peer_command.add_argument("--nats-url", default="nats://127.0.0.1:4222")
+    peer_command.add_argument("--timeout-sec", type=float, default=30.0)
+    peer_command.add_argument("--discovery-timeout-sec", type=float, default=1.0)
+    peer_command.add_argument(
         "--require-capabilities",
-        default="external-openclaw-gateway",
+        default="task-dispatch",
         help="Comma-separated capabilities required when resolving by --device-id.",
     )
-    openclaw_command.add_argument("openclaw_command")
-    openclaw_command.add_argument("--payload", default=None, help="JSON object payload for the gateway command.")
+    peer_command.add_argument("peer_command")
+    peer_command.add_argument("--payload", default=None, help="JSON object payload for the peer command.")
 
     agent_check = sub.add_parser("agent-check", help="Check if node agent is ready and can accept tasks")
     agent_check.add_argument("--client-id", default="cli-client")
@@ -795,11 +840,14 @@ async def dispatch(args: argparse.Namespace) -> None:
     if args.command == "node-snapshot":
         await cmd_node_snapshot(args)
         return
-    if args.command == "openclaw-ping":
-        await cmd_openclaw_ping(args)
+    if args.command == "discover-nodes":
+        await cmd_discover_nodes(args)
         return
-    if args.command == "openclaw-command":
-        await cmd_openclaw_command(args)
+    if args.command == "peer-ping":
+        await cmd_peer_ping(args)
+        return
+    if args.command == "peer-command":
+        await cmd_peer_command(args)
         return
     if args.command == "agent-check":
         await cmd_agent_check(args)

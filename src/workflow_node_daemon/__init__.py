@@ -1,13 +1,13 @@
 from .daemon import WorkflowNodeDaemon
 from .models import NodeSnapshot, TaskRecord, TaskSnapshot, TaskStatus
 from .nats_bridge import NatsDaemonBridge
-from .openclaw import OpenClawNodeConfig, OpenClawNodeHost
+from .peer import PeerNodeConfig, PeerNodeHost
 
 __all__ = [
     "NatsDaemonBridge",
     "NodeSnapshot",
-    "OpenClawNodeConfig",
-    "OpenClawNodeHost",
+    "PeerNodeConfig",
+    "PeerNodeHost",
     "TaskRecord",
     "TaskSnapshot",
     "TaskStatus",

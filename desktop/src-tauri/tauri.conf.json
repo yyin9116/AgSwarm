@@ -5,7 +5,7 @@
   "identifier": "works.earendil.agswarm.client",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:3000",
+    "devUrl": "http://127.0.0.1:3000",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
@@ -15,8 +15,8 @@
         "title": "AgSwarm Client",
         "width": 1180,
         "height": 820,
-        "minWidth": 960,
-        "minHeight": 680,
+        "minWidth": 390,
+        "minHeight": 640,
         "resizable": true
       }
     ],
@@ -27,6 +27,19 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "externalBin": [
+      "binaries/pi-agent-session-bridge",
+      "binaries/node"
+    ],
+    "resources": [
+      "binaries/package.json",
+      "binaries/assets",
+      "binaries/theme",
+      "binaries/pi-web-agswarm-server.mjs",
+      "binaries/runtime-node",
+      "binaries/pi-web-client",
+      "binaries/pi-web-plugins"
+    ],
     "icon": [
       "../../assets/icons/app-icon.png",
       "../../assets/icons/app-icon.icns",
@@ -34,4 +47,3 @@
     ]
   }
 }
-

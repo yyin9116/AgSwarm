@@ -37,8 +37,8 @@ def client_inbox(client_id: str) -> str:
     return f"{ROOT}.clients.{client_id}.inbox"
 
 
-def openclaw_command_request(node_id: str) -> str:
-    return f"{ROOT}.nodes.{node_id}.openclaw.command"
+def peer_command_request(node_id: str) -> str:
+    return f"{ROOT}.nodes.{node_id}.peer.command"
 
 
 def file_prepare_request(node_id: str) -> str:

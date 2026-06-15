@@ -8,8 +8,8 @@ Architecture
 - Maps pi RPC events -> AgSwarm EventSink events
 - Returns when pi agent completes (agent_end event)
 
-This adapter does NOT use OpenClaw Node Host directly; it uses pi's native
-RPC mode. For OpenClaw Node Host integration, see docs/openclaw-node.md.
+This adapter uses pi's native RPC mode; AgSwarm exposes it as a peer node
+capability for task routing.
 """
 from __future__ import annotations
 
@@ -28,6 +28,14 @@ from workflow_runtime.protocol import Event, TaskEnvelope
 
 class PiAdapter(Adapter):
     name = "pi"
+    _COMMON_NODE_DIRS = (
+        "/opt/homebrew/bin",
+        "/opt/homebrew/opt/node/bin",
+        "/usr/local/bin",
+        "/usr/local/opt/node/bin",
+        "/usr/bin",
+        "/bin",
+    )
 
     def __init__(
         self,
@@ -45,25 +53,83 @@ class PiAdapter(Adapter):
             cwd: Working directory for pi subprocess
             env: Extra env vars for pi subprocess
         """
-        self.pi_cli = pi_cli or self._resolve_pi_cli()
+        self.env = self._normalized_env(env)
+        self.pi_cli = pi_cli or self._resolve_pi_cli(self.env)
         self.default_model = default_model
         self.provider = provider
         self.cwd = cwd or os.getcwd()
-        self.env = {**os.environ, **(env or {})}
         self._seq = 0
+        self._last_message_text = ""
+        self._last_thinking_text = ""
+        self._last_token_text = ""
 
     @staticmethod
-    def _resolve_pi_cli() -> str:
+    def _resolve_pi_cli(env: dict[str, str] | None = None) -> str:
         # 1. PATH
-        if shutil.which("pi"):
+        if shutil.which("pi", path=(env or os.environ).get("PATH")):
             return "pi"
         # 2. Local build in ~/test/pi
         local = Path.home() / "test" / "pi" / "packages" / "coding-agent" / "dist" / "cli.js"
         if local.exists():
-            return f"node {shlex.quote(str(local))}"
+            node = PiAdapter._resolve_node_binary(env or os.environ)
+            if not node:
+                raise RuntimeError(
+                    "pi CLI local build found, but node was not found. "
+                    "Install Node.js or set WORKFLOW_PI_CLI to an executable pi command."
+                )
+            return f"{shlex.quote(node)} {shlex.quote(str(local))}"
         raise RuntimeError(
             "pi CLI not found. Install pi or set pi_cli=path/to/pi"
         )
+
+    @classmethod
+    def _normalized_env(cls, env: dict[str, str] | None = None) -> dict[str, str]:
+        merged = {**os.environ, **(env or {})}
+        merged["PATH"] = cls._node_friendly_path(merged)
+        return merged
+
+    @classmethod
+    def _node_friendly_path(cls, env: dict[str, str]) -> str:
+        paths: list[str] = []
+        home = env.get("HOME") or str(Path.home())
+        for path in (
+            Path(home) / ".nvm" / "current" / "bin",
+            Path(home) / ".fnm" / "aliases" / "default" / "bin",
+            Path(home) / ".asdf" / "shims",
+            Path(home) / ".volta" / "bin",
+        ):
+            if path.is_dir():
+                cls._append_path(paths, str(path))
+        for path in cls._COMMON_NODE_DIRS:
+            cls._append_path(paths, path)
+        for path in (env.get("PATH") or "").split(os.pathsep):
+            cls._append_path(paths, path)
+        return os.pathsep.join(paths)
+
+    @staticmethod
+    def _append_path(paths: list[str], path: str) -> None:
+        value = path.strip()
+        if value and value not in paths:
+            paths.append(value)
+
+    @classmethod
+    def _resolve_node_binary(cls, env: dict[str, str]) -> str | None:
+        node = shutil.which("node", path=cls._node_friendly_path(env))
+        if node:
+            return node
+        for directory in cls._COMMON_NODE_DIRS:
+            candidate = Path(directory) / "node"
+            if candidate.exists() and os.access(candidate, os.X_OK):
+                return str(candidate)
+        return None
+
+    @classmethod
+    def _normalize_command_for_env(cls, cmd_parts: list[str], env: dict[str, str]) -> list[str]:
+        if cmd_parts and cmd_parts[0] == "node":
+            node = cls._resolve_node_binary(env)
+            if node:
+                return [node, *cmd_parts[1:]]
+        return cmd_parts
 
     def _next_seq(self) -> int:
         self._seq += 1
@@ -94,6 +160,7 @@ class PiAdapter(Adapter):
         for key, value in task.context.items():
             if isinstance(value, str):
                 proc_env[key] = value
+        cmd_parts = self._normalize_command_for_env(cmd_parts, proc_env)
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -232,14 +299,45 @@ class PiAdapter(Adapter):
 
             # Map pi events -> AgSwarm events
             event_type, payload = self._map_pi_event(msg)
+            if event_type == "agent.token" and self._is_duplicate_token_payload(payload):
+                continue
+            if event_type == "agent.token" and not any(
+                payload.get(key) for key in ("text", "thinking", "tool_call")
+            ):
+                continue
             if event_type:
                 await sink.emit(event_type, payload)
 
             # Stop reading when agent completes
             if msg_type == "agent_end":
+                error_message = self._agent_end_error_message(msg)
+                if error_message:
+                    await sink.emit(
+                        "adapter.error",
+                        {
+                            "code": "pi_agent_error",
+                            "message": error_message,
+                        },
+                    )
+                    return False
                 return True
 
         return False
+
+    def _agent_end_error_message(self, msg: dict[str, Any]) -> str:
+        messages = msg.get("messages")
+        if not isinstance(messages, list):
+            return ""
+        for message in reversed(messages):
+            if not isinstance(message, dict):
+                continue
+            error_message = message.get("errorMessage") or message.get("error")
+            if isinstance(error_message, str) and error_message.strip():
+                return error_message.strip()
+            stop_reason = message.get("stopReason")
+            if stop_reason == "error":
+                return "pi agent stopped with an error before producing a response."
+        return ""
 
     def _map_pi_event(self, msg: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
         """Map a single pi RPC event to AgSwarm EventSink event type + payload."""
@@ -260,9 +358,9 @@ class PiAdapter(Adapter):
             "message_update": (
                 "agent.token",
                 {
-                    "text": msg.get("text", ""),
-                    "thinking": msg.get("thinking", ""),
-                    "tool_call": msg.get("toolCall"),
+                    "text": self._extract_message_update_text(msg),
+                    "thinking": self._extract_message_update_thinking(msg),
+                    "tool_call": self._extract_message_update_tool_call(msg),
                 },
             ),
             "message_end": ("agent.message_end", {}),
@@ -276,7 +374,11 @@ class PiAdapter(Adapter):
             ),
             "tool_execution_end": (
                 "agent.tool_end",
-                {"result": msg.get("result")},
+                {
+                    "tool": msg.get("tool"),
+                    "params": msg.get("params"),
+                    "result": msg.get("result"),
+                },
             ),
             "compaction_start": ("agent.compaction_start", {}),
             "compaction_end": ("agent.compaction_end", {}),
@@ -289,3 +391,140 @@ class PiAdapter(Adapter):
         }
 
         return mapping.get(msg_type, (None, {}))
+
+    def _extract_message_update_text(self, msg: dict[str, Any]) -> str:
+        event = msg.get("assistantMessageEvent")
+        if isinstance(event, dict):
+            if self._message_update_has_thinking(msg):
+                return ""
+            if self._event_text_phase(event) not in {"", "final_answer"}:
+                return ""
+            for key in ("text", "delta", "content"):
+                value = event.get(key)
+                if isinstance(value, str) and value:
+                    return self._delta_from_stream_text(value)
+            if event.get("type") == "text":
+                value = event.get("text")
+                if isinstance(value, str):
+                    return self._delta_from_stream_text(value)
+        current_text = self._extract_message_content_text(msg.get("message"))
+        return self._delta_from_stream_text(current_text)
+
+    def _message_update_has_thinking(self, msg: dict[str, Any]) -> bool:
+        event = msg.get("assistantMessageEvent")
+        if isinstance(event, dict):
+            for key in ("thinking", "reasoning", "summary"):
+                value = event.get(key)
+                if isinstance(value, str) and value:
+                    return True
+        return bool(self._extract_current_thinking(msg))
+
+    def _delta_from_stream_text(self, current_text: str) -> str:
+        if not current_text:
+            return ""
+        if current_text.startswith(self._last_message_text):
+            delta = current_text[len(self._last_message_text):]
+            self._last_message_text = current_text
+        else:
+            delta = current_text
+            self._last_message_text += current_text
+        return delta
+
+    def _is_duplicate_token_payload(self, payload: dict[str, Any]) -> bool:
+        text = payload.get("text")
+        if not isinstance(text, str) or not text:
+            return False
+        if text == self._last_token_text and self._last_message_text.endswith(text):
+            return True
+        self._last_token_text = text
+        return False
+
+    def _extract_message_update_thinking(self, msg: dict[str, Any]) -> str:
+        current_thinking = self._extract_current_thinking(msg)
+        if not current_thinking:
+            return ""
+        return self._delta_from_stream_thinking(current_thinking)
+
+    def _extract_current_thinking(self, msg: dict[str, Any]) -> str:
+        event = msg.get("assistantMessageEvent")
+        if isinstance(event, dict):
+            for key in ("thinking", "reasoning", "summary"):
+                value = event.get(key)
+                if isinstance(value, str) and value:
+                    return value
+        message = msg.get("message")
+        if not isinstance(message, dict):
+            return ""
+        content = message.get("content")
+        if not isinstance(content, list):
+            return ""
+        thoughts: list[str] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") in {"thinking", "reasoning"}:
+                value = part.get("thinking") or part.get("text") or part.get("summary")
+                if isinstance(value, str) and value:
+                    thoughts.append(value)
+        return "\n".join(thoughts)
+
+    def _delta_from_stream_thinking(self, current_thinking: str) -> str:
+        if not current_thinking:
+            return ""
+        if current_thinking.startswith(self._last_thinking_text):
+            delta = current_thinking[len(self._last_thinking_text):]
+            self._last_thinking_text = current_thinking
+            return delta
+        if self._last_thinking_text and current_thinking in self._last_thinking_text:
+            return ""
+        self._last_thinking_text = current_thinking
+        return current_thinking
+
+    def _extract_message_update_tool_call(self, msg: dict[str, Any]) -> Any:
+        event = msg.get("assistantMessageEvent")
+        if isinstance(event, dict):
+            for key in ("toolCall", "tool_call", "tool"):
+                value = event.get(key)
+                if value is not None:
+                    return value
+        message = msg.get("message")
+        if not isinstance(message, dict):
+            return None
+        content = message.get("content")
+        if not isinstance(content, list):
+            return None
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "toolCall":
+                return part
+        return None
+
+    def _extract_message_content_text(self, message: Any) -> str:
+        if not isinstance(message, dict):
+            return ""
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return ""
+        texts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                texts.append(part)
+            elif isinstance(part, dict) and part.get("type") == "text":
+                if self._event_text_phase(part) not in {"", "final_answer"}:
+                    continue
+                value = part.get("text")
+                if isinstance(value, str):
+                    texts.append(value)
+        return "".join(texts)
+
+    def _event_text_phase(self, value: dict[str, Any]) -> str:
+        signature = value.get("textSignature")
+        if not isinstance(signature, str) or not signature.strip():
+            return ""
+        try:
+            parsed = json.loads(signature)
+        except json.JSONDecodeError:
+            return ""
+        phase = parsed.get("phase") if isinstance(parsed, dict) else ""
+        return phase if isinstance(phase, str) else ""

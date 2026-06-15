@@ -1,0 +1,9 @@
+{
+  "name": "agswarm-pi-web-theme",
+  "private": true,
+  "piWeb": {
+    "plugins": [
+      { "id": "agswarm-theme", "module": "pi-web-plugin.js" }
+    ]
+  }
+}

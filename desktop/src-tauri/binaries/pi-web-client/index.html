@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>PI WEB</title>
+    <meta name="theme-color" content="#f8fafc" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <style>
+      :root {
+        color-scheme: light;
+        --pi-bg: #f8fafc;
+        --pi-surface: #ffffff;
+        --pi-surface-hover: #f1f5f9;
+        --pi-terminal-bg: #05070a;
+        --pi-terminal-text: #e6edf3;
+        --pi-border: #dbe3ea;
+        --pi-border-muted: #e8eef4;
+        --pi-text: #172033;
+        --pi-text-secondary: #334155;
+        --pi-text-bright: #0f172a;
+        --pi-muted: #64748b;
+        --pi-dim: #94a3b8;
+        --pi-accent: #0f766e;
+        --pi-accent-border: #0d9488;
+        --pi-selection-bg: #ccfbf1;
+        --pi-success: #15803d;
+        --pi-success-border: #22c55e;
+        --pi-success-bg: #f0fdf4;
+        --pi-success-surface: #dcfce7;
+        --pi-success-ring: #22c55e55;
+        --pi-warning: #b45309;
+        --pi-warning-border: #f59e0b;
+        --pi-warning-surface: #fffbeb;
+        --pi-danger: #dc2626;
+        --pi-purple: #7c3aed;
+        --pi-purple-border: #8b5cf6;
+        --pi-purple-surface: #f5f3ff;
+        --pi-overlay: #0f172a33;
+        --pi-shadow-soft: #0f172a14;
+        --pi-shadow: #0f172a1f;
+        --pi-shadow-strong: #0f172a2e;
+        --pi-bg-overlay-soft: #f8fafcdd;
+        --pi-bg-overlay: #ffffffe6;
+        --pi-success-bg-overlay: #f0fdf4ee;
+        --pi-terminal-selection: #264f78;
+      }
+      html, body { margin: 0; height: 100%; overflow: hidden; background: var(--pi-bg); color: var(--pi-text); }
+      body { min-height: 100dvh; }
+    </style>
+    <script>
+      try {
+        localStorage.setItem('pi-web-app-theme', JSON.stringify({ themeId: 'agswarm-theme:light', auto: false }));
+      } catch {}
+    </script>
+    <script type="module" crossorigin src="/assets/index-D4dbiKXF.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/vendor-editor-core-B4Sq6exx.js">
+    <link rel="modulepreload" crossorigin href="/assets/vendor-editor-languages-DznYbTkJ.js">
+  </head>
+  <body>
+    <pi-web-app></pi-web-app>
+  </body>
+</html>

@@ -1,0 +1,127 @@
+{
+  "name": "@jmfederico/pi-web",
+  "version": "1.202606.3",
+  "description": "Remote web UI and browser control plane for persistent Pi Coding Agent sessions.",
+  "license": "MIT",
+  "author": "Federico Jaramillo Martinez",
+  "type": "module",
+  "bin": {
+    "pi-web": "dist/cli.js",
+    "pi-web-server": "dist/server/index.js",
+    "pi-web-sessiond": "dist/server/sessiond.js"
+  },
+  "files": [
+    "dist",
+    "install.sh",
+    "README.md",
+    "LICENSE",
+    "extensions",
+    "docs/plugins.md",
+    "docs/assets",
+    "plugin-api.d.ts",
+    "plugin-api/unstable.d.ts"
+  ],
+  "scripts": {
+    "dev": "bash -c 'trap \"kill 0\" EXIT; npm run dev:sessiond & npm run dev:web & npm run dev:client & wait'",
+    "dev:sessiond": "tsx watch src/server/sessiond.ts",
+    "dev:web": "bash -c 'set -e; npm run build:plugins; trap \"kill 0\" EXIT; npm run dev:plugins & tsx watch src/server/index.ts & wait'",
+    "dev:server": "npm run dev:web",
+    "dev:client": "vite --host 0.0.0.0",
+    "dev:plugins": "node scripts/build-plugins.mjs --watch",
+    "build": "tsc -p tsconfig.build.json && npm run build:plugin-api && npm run build:plugins && vite build",
+    "build:plugin-api": "tsc -p tsconfig.plugin-api.json",
+    "build:plugins": "tsc -p tsconfig.plugins.json && node scripts/build-plugins.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint \"src/**/*.ts\" \"extensions/**/*.ts\" \"pi-web-plugins/**/*.ts\" vite.config.ts vitest.config.ts",
+    "test": "vitest run --config vitest.config.ts",
+    "verify": "npm run typecheck && npm run lint && npm test",
+    "start": "tsx src/server/index.ts",
+    "start:sessiond": "tsx src/server/sessiond.ts",
+    "clean": "rm -rf dist",
+    "prepack": "npm run build",
+    "pack:dry": "npm pack --dry-run",
+    "prepublishOnly": "npm run verify",
+    "publish:npm": "npm publish --access public",
+    "prepare": "node scripts/install-git-hooks.mjs",
+    "changeset": "changeset",
+    "release:version": "changeset version",
+    "changelog:status": "changeset status"
+  },
+  "dependencies": {
+    "@codemirror/lang-css": "^6.3.1",
+    "@codemirror/lang-go": "^6.0.1",
+    "@codemirror/lang-html": "^6.4.11",
+    "@codemirror/lang-javascript": "^6.2.5",
+    "@codemirror/lang-json": "^6.0.2",
+    "@codemirror/lang-markdown": "^6.5.0",
+    "@codemirror/lang-python": "^6.2.1",
+    "@codemirror/lang-rust": "^6.0.2",
+    "@codemirror/legacy-modes": "^6.5.2",
+    "@fastify/static": "^9.1.3",
+    "@fastify/websocket": "^11.2.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "codemirror": "^6.0.2",
+    "diff": "^8.0.4",
+    "fastify": "^5.6.1",
+    "lit": "^3.3.1",
+    "marked": "^18.0.3",
+    "node-pty": "^1.1.0",
+    "ws": "^8.20.1"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.31.0",
+    "@earendil-works/pi-coding-agent": "^0.79.1",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.10.1",
+    "@types/ws": "^8.18.1",
+    "eslint": "^10.3.0",
+    "globals": "^17.6.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.59.2",
+    "vite": "^7.2.4",
+    "vitest": "^4.1.5",
+    "@earendil-works/pi-ai": "^0.79.1"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jmfederico/pi-web.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jmfederico/pi-web/issues"
+  },
+  "homepage": "https://pi-web.dev/",
+  "packageManager": "npm@11.11.0",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.78.0 <1",
+    "@earendil-works/pi-ai": ">=0.78.0 <1"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "coding-agent",
+    "agent",
+    "web",
+    "ui",
+    "web-ui",
+    "webui",
+    "remote",
+    "browser",
+    "control-plane",
+    "persistent-sessions"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ],
+    "image": "https://raw.githubusercontent.com/jmfederico/pi-web/main/docs/assets/pi-web-banner.png"
+  }
+}

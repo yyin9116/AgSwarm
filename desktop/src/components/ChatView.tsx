@@ -1,6 +1,37 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { Send, Bot, User, Sparkles, CheckCircle2, Loader2, ArrowRight, Monitor, Laptop, Smartphone, ArrowDownLeft, ArrowUpRight, FileText, Download, Image as ImageIcon, Paperclip, X } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { FC } from 'react';
+import {
+  ActionIcon,
+  Avatar,
+  Badge,
+  Box,
+  Combobox,
+  FileButton,
+  Group,
+  Loader,
+  Paper,
+  ScrollArea,
+  Stack,
+  Text,
+  TextInput,
+  ThemeIcon,
+  Tooltip,
+  useCombobox,
+} from '@mantine/core';
+import {
+  ArrowDownLeft,
+  CheckCircle2,
+  FileText,
+  Image as ImageIcon,
+  Laptop,
+  Monitor,
+  Paperclip,
+  Send,
+  User,
+  X,
+} from 'lucide-react';
 import { AppIcon } from './AppIcon';
+import type { Device } from './DevicesView';
 
 export interface ChatMessage {
   id: string;
@@ -31,294 +62,309 @@ export interface ChatMessage {
 interface ChatViewProps {
   messages: ChatMessage[];
   onSendMessage: (content: string, file?: File) => void;
+  devices?: Device[];
+  localNodeId: string;
+  localDeviceLabel: string;
 }
 
-function ThinkingIndicator() {
-  const [dots, setDots] = useState('');
-  const [messageIndex, setMessageIndex] = useState(0);
-  const messages = ['Analyzing request', 'Locating device', 'Preparing payload', 'Establishing connection'];
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setDots(prev => prev.length >= 3 ? '' : prev + '.');
-    }, 500);
-    return () => clearInterval(interval);
-  }, []);
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setMessageIndex(prev => (prev + 1) % messages.length);
-    }, 2000);
-    return () => clearInterval(interval);
-  }, []);
-
-  return (
-    <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400">
-      <Loader2 className="w-4 h-4 animate-spin" />
-      <span className="text-sm font-medium">{messages[messageIndex]}{dots}</span>
-    </div>
-  );
-}
-
-export function ChatView({ messages, onSendMessage }: ChatViewProps) {
+export function ChatView({
+  messages,
+  onSendMessage,
+  devices = [],
+  localNodeId,
+  localDeviceLabel,
+}: ChatViewProps) {
   const [input, setInput] = useState('');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [autoScroll, setAutoScroll] = useState(true);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const combobox = useCombobox({
+    onDropdownClose: () => combobox.resetSelectedOption(),
+  });
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
+  const remoteDevices = useMemo(() => devices.filter(device => device.id !== localNodeId), [devices, localNodeId]);
+  const mentionQuery = getMentionQuery(input);
+  const mentionOptions = useMemo(() => {
+    if (mentionQuery === null) return [];
+    const query = mentionQuery.toLowerCase();
+    return remoteDevices
+      .filter(device => device.id.toLowerCase().includes(query) || device.name.toLowerCase().includes(query))
+      .slice(0, 6);
+  }, [mentionQuery, remoteDevices]);
 
   useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+    inputRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    if (mentionOptions.length) combobox.openDropdown();
+    else combobox.closeDropdown();
+  }, [combobox, mentionOptions.length]);
+
+  useEffect(() => {
+    if (!autoScroll) return;
+    window.requestAnimationFrame(() => {
+      const viewport = viewportRef.current;
+      if (viewport) viewport.scrollTop = viewport.scrollHeight;
+    });
+  }, [autoScroll, messages]);
+
+  const handleScroll = () => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    setAutoScroll(viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 80);
+  };
 
   const handleSend = () => {
     if (!input.trim() && !selectedFile) return;
     onSendMessage(input, selectedFile || undefined);
     setInput('');
     setSelectedFile(null);
+    setAutoScroll(true);
+    combobox.closeDropdown();
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0) {
-      setSelectedFile(e.target.files[0]);
-    }
-  };
-
-  const getStatusBadge = (status: string) => {
-    switch (status) {
-      case 'parsing':
-      case 'created':
-      case 'dispatching':
-      case 'accepted':
-      case 'running':
-        return <span className="flex items-center gap-1 text-xs font-medium text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full"><Loader2 className="w-3 h-3 animate-spin"/> {status.charAt(0).toUpperCase() + status.slice(1)}</span>;
-      case 'completed':
-        return <span className="flex items-center gap-1 text-xs font-medium text-green-600 bg-green-50 px-2 py-0.5 rounded-full"><CheckCircle2 className="w-3 h-3"/> Completed</span>;
-      default:
-        return null;
-    }
+  const insertMention = (device: Device) => {
+    setInput(prev => replaceActiveMention(prev, device.id));
+    combobox.closeDropdown();
+    inputRef.current?.focus();
   };
 
   return (
-    <div className="flex flex-col h-full max-w-3xl mx-auto pt-8 pb-4 px-4 sm:px-6">
-      <div className="flex items-center gap-3 mb-6 px-2">
-        <div className="w-10 h-10 rounded-full flex items-center justify-center">
-          <AppIcon className="w-10 h-10" />
-        </div>
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight dark:text-white">Agent Copilot</h1>
-          <p className="text-sm text-gray-500 dark:text-gray-400">Ask me to orchestrate tasks across your devices.</p>
-        </div>
-      </div>
+    <Stack h="100%" maw={860} mx="auto" px="md" py="xl" gap="md">
+      <Group align="flex-start" gap="md">
+        <AppIcon className="h-10 w-10" />
+        <Box flex={1} miw={0}>
+          <Group gap="xs" wrap="wrap">
+            <Text fw={700} size="xl" truncate>{localDeviceLabel || 'AgSwarm Client'}</Text>
+            <Badge color="teal" variant="light">This Client</Badge>
+          </Group>
+          <Text c="dimmed" ff="monospace" size="xs" truncate>{localNodeId}</Text>
+          <Text c="dimmed" size="sm" truncate>
+            {remoteDevices.length
+              ? `Send to ${remoteDevices.map(device => `@${device.id}`).join(', ')}`
+              : 'Waiting for another AgSwarm client on NATS.'}
+          </Text>
+        </Box>
+      </Group>
 
-      <div className="flex-1 overflow-y-auto space-y-6 px-2 pb-6 scrollbar-hide">
-        {messages.map((msg) => (
-          <div key={msg.id} className={`flex gap-4 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
-            <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center mt-1 ${
-              msg.role === 'user' ? 'bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900' : 
-              msg.role === 'system' ? 'bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400 border border-indigo-100 dark:border-indigo-800/50' :
-              ''
-            }`}>
-              {msg.role === 'user' ? <User className="w-4 h-4" /> : 
-               msg.role === 'system' ? <ArrowDownLeft className="w-4 h-4" /> : 
-               <AppIcon className="w-8 h-8" />}
-            </div>
-            
-            <div className={`flex flex-col max-w-[85%] ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
-              {msg.attachment && (
-                <div className="mb-2 flex items-center gap-3 p-2.5 bg-gray-50 dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 w-fit max-w-full">
-                  <div className="w-8 h-8 bg-teal-100 dark:bg-teal-900/30 text-teal-600 dark:text-teal-400 rounded-lg flex items-center justify-center flex-shrink-0">
-                    <FileText className="w-4 h-4" />
-                  </div>
-                  <div className="flex-1 min-w-0 pr-2">
-                    <p className="text-xs font-medium text-gray-900 dark:text-white truncate">{msg.attachment.name}</p>
-                    <p className="text-[10px] text-gray-500 dark:text-gray-400">{msg.attachment.size}</p>
-                  </div>
-                </div>
-              )}
-              <div className={`px-4 py-3 rounded-2xl ${
-                msg.role === 'user' 
-                  ? 'bg-gray-900 dark:bg-gray-100 text-white dark:text-gray-900 rounded-tr-sm' 
-                  : msg.role === 'system'
-                  ? 'bg-indigo-50/50 dark:bg-indigo-900/20 border border-indigo-100 dark:border-indigo-800/50 text-indigo-900 dark:text-indigo-300 rounded-tl-sm'
-                  : 'bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 shadow-sm rounded-tl-sm text-gray-800 dark:text-gray-200'
-              }`}>
-                {msg.isThinking ? (
-                  <ThinkingIndicator />
-                ) : (
-                  <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.content}</p>
-                )}
-              </div>
+      <ScrollArea.Autosize
+        mah="calc(100vh - 230px)"
+        flex={1}
+        viewportRef={viewportRef}
+        onScrollPositionChange={handleScroll}
+        type="never"
+      >
+        <Stack gap="md" pr="xs">
+          {messages.map(message => (
+            <MessageRow key={message.id} message={message} onFollowUp={onSendMessage} />
+          ))}
+        </Stack>
+      </ScrollArea.Autosize>
 
-              {/* Agent Task Proposal Card */}
-              {msg.taskProposal && (
-                <div className={`mt-3 w-full max-w-sm bg-white dark:bg-gray-900 border rounded-2xl shadow-sm overflow-hidden ${
-                  msg.taskProposal.direction === 'incoming' ? 'border-indigo-100 dark:border-indigo-800/50' : 'border-gray-100 dark:border-gray-800'
-                }`}>
-                  <div className={`px-4 py-2 border-b flex items-center justify-between ${
-                    msg.taskProposal.direction === 'incoming' ? 'bg-indigo-50/50 dark:bg-indigo-900/20 border-indigo-100 dark:border-indigo-800/50' : 'bg-gray-50/50 dark:bg-gray-800/50 border-gray-100 dark:border-gray-800'
-                  }`}>
-                    <span className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                      {msg.taskProposal.direction === 'incoming' ? 'Incoming Task' : 'Task Execution'}
-                    </span>
-                    {getStatusBadge(msg.taskProposal.status)}
-                  </div>
-                  <div className="p-4 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${
-                          msg.taskProposal.direction === 'incoming' ? 'bg-indigo-50 dark:bg-indigo-900/30 text-indigo-600 dark:text-indigo-400' : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400'
-                        }`}>
-                          {msg.taskProposal.direction === 'incoming' ? <Monitor className="w-4 h-4" /> : <AppIcon className="w-4 h-4" />}
-                        </div>
-                        {msg.taskProposal.direction === 'incoming' ? (
-                          <ArrowDownLeft className="w-4 h-4 text-indigo-300 dark:text-indigo-700" />
-                        ) : (
-                          <ArrowRight className="w-4 h-4 text-gray-300 dark:text-gray-700" />
-                        )}
-                        <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${
-                          msg.taskProposal.direction === 'incoming' ? 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400' : 'bg-teal-50 dark:bg-teal-900/30 text-teal-600 dark:text-teal-400'
-                        }`}>
-                          {msg.taskProposal.direction === 'incoming' ? <AppIcon className="w-4 h-4" /> : <Laptop className="w-4 h-4" />}
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <div className="text-sm font-medium text-gray-900 dark:text-gray-100">{msg.taskProposal.targetDeviceName}</div>
-                        <div className="text-xs text-gray-500 dark:text-gray-400 font-mono">{msg.taskProposal.targetDeviceId}</div>
-                      </div>
-                    </div>
-                    
-                    <div className="bg-gray-50 dark:bg-gray-800/50 rounded-xl p-3">
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="text-xs font-medium text-gray-500 dark:text-gray-400">Action</span>
-                        <span className="text-xs font-semibold text-gray-900 dark:text-gray-100">{msg.taskProposal.taskType}</span>
-                      </div>
-                      <p className="text-xs text-gray-600 dark:text-gray-400 font-mono truncate">{msg.taskProposal.payload}</p>
-                    </div>
-
-                    {msg.taskProposal.result && (
-                      <div className="bg-green-50 dark:bg-green-900/20 border border-green-100 dark:border-green-800/50 rounded-xl p-3 mt-2">
-                        <div className="flex items-center gap-1.5 mb-1">
-                          <CheckCircle2 className="w-3.5 h-3.5 text-green-600 dark:text-green-400" />
-                          <span className="text-xs font-medium text-green-800 dark:text-green-400">Result</span>
-                        </div>
-                        <p className="text-xs text-green-700 dark:text-green-500 font-mono truncate">{msg.taskProposal.result}</p>
-                        
-                        {/* File Preview Section */}
-                        {msg.taskProposal.preview && (
-                          <div className="mt-3 border border-green-200/60 dark:border-green-800/50 rounded-lg overflow-hidden bg-white dark:bg-gray-900 shadow-sm">
-                            {msg.taskProposal.preview.type === 'image' ? (
-                              <div className="relative group">
-                                <img 
-                                  src={msg.taskProposal.preview.url} 
-                                  alt={msg.taskProposal.preview.name}
-                                  className="w-full h-auto max-h-48 object-cover"
-                                  referrerPolicy="no-referrer"
-                                />
-                                <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                                  <button className="bg-white/90 dark:bg-gray-800/90 text-gray-900 dark:text-white p-2 rounded-full shadow-sm hover:scale-105 transition-transform">
-                                    <Download className="w-4 h-4" />
-                                  </button>
-                                </div>
-                                <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/60 to-transparent p-2">
-                                  <p className="text-xs text-white font-medium truncate flex items-center gap-1">
-                                    <ImageIcon className="w-3 h-3" /> {msg.taskProposal.preview.name}
-                                  </p>
-                                </div>
-                              </div>
-                            ) : (
-                              <div className="flex items-center gap-3 p-3 hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors cursor-pointer">
-                                <div className="w-10 h-10 bg-red-50 dark:bg-red-900/20 text-red-500 dark:text-red-400 rounded-lg flex items-center justify-center flex-shrink-0">
-                                  <FileText className="w-5 h-5" />
-                                </div>
-                                <div className="flex-1 min-w-0">
-                                  <p className="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">{msg.taskProposal.preview.name}</p>
-                                  <p className="text-xs text-gray-500 dark:text-gray-400">PDF Document • 1.2 MB</p>
-                                </div>
-                                <button className="text-gray-400 hover:text-teal-600 dark:hover:text-teal-400 p-2 transition-colors">
-                                  <Download className="w-5 h-5" />
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* Follow-up Options */}
-              {msg.followUpOptions && msg.taskProposal?.status === 'completed' && (
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {msg.followUpOptions.map((option, idx) => (
-                    <button
-                      key={idx}
-                      onClick={() => onSendMessage(option)}
-                      className="text-xs font-medium px-3 py-1.5 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 rounded-full hover:bg-gray-50 dark:hover:bg-gray-800 hover:border-gray-300 dark:hover:border-gray-600 transition-colors shadow-sm"
-                    >
-                      {option}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        ))}
-        <div ref={messagesEndRef} />
-      </div>
-
-      <div className="relative mt-auto mb-8">
+      <Stack gap="xs">
         {selectedFile && (
-          <div className="absolute -top-12 left-0 right-0 flex items-center gap-2 p-2 bg-gray-50 dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 shadow-sm mx-2">
-            <div className="w-8 h-8 bg-teal-100 dark:bg-teal-900/30 text-teal-600 dark:text-teal-400 rounded-lg flex items-center justify-center">
-              <FileText className="w-4 h-4" />
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-xs font-medium text-gray-900 dark:text-white truncate">{selectedFile.name}</p>
-              <p className="text-[10px] text-gray-500 dark:text-gray-400">{(selectedFile.size / 1024).toFixed(1)} KB</p>
-            </div>
-            <button 
-              onClick={() => setSelectedFile(null)}
-              className="p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition-colors"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
+          <Paper withBorder radius="md" p="xs">
+            <Group gap="sm">
+              <ThemeIcon variant="light" color="teal"><FileText size={16} /></ThemeIcon>
+              <Box flex={1} miw={0}>
+                <Text size="sm" fw={600} truncate>{selectedFile.name}</Text>
+                <Text size="xs" c="dimmed">{(selectedFile.size / 1024).toFixed(1)} KB</Text>
+              </Box>
+              <ActionIcon variant="subtle" color="gray" aria-label="Remove attachment" onClick={() => setSelectedFile(null)}>
+                <X size={16} />
+              </ActionIcon>
+            </Group>
+          </Paper>
         )}
-        <div className="relative flex items-center">
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            className="absolute left-3 p-2 text-gray-400 hover:text-teal-600 dark:hover:text-teal-400 transition-colors"
-          >
-            <Paperclip className="w-5 h-5" />
-          </button>
-          <input
-            type="file"
-            ref={fileInputRef}
-            onChange={handleFileChange}
-            className="hidden"
-          />
-          <input
-            type="text"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-            placeholder="e.g., Send a latex file to my Mac..."
-            className="w-full bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 focus:border-teal-500 focus:ring-2 focus:ring-teal-200 dark:focus:ring-teal-900/50 rounded-2xl py-4 pl-12 pr-14 shadow-sm transition-all outline-none dark:text-white dark:placeholder-gray-500"
-          />
-          <button
-            onClick={handleSend}
-            disabled={!input.trim() && !selectedFile}
-            className="absolute right-2 w-10 h-10 bg-teal-600 hover:bg-teal-700 disabled:bg-gray-200 dark:disabled:bg-gray-800 disabled:text-gray-400 dark:disabled:text-gray-600 text-white rounded-xl flex items-center justify-center transition-colors"
-          >
-            <Send className="w-4 h-4 ml-0.5" />
-          </button>
-        </div>
-      </div>
-    </div>
+
+        <Combobox store={combobox} onOptionSubmit={(value) => {
+          const device = remoteDevices.find(item => item.id === value);
+          if (device) insertMention(device);
+        }}>
+          <Combobox.DropdownTarget>
+            <TextInput
+              ref={inputRef}
+              value={input}
+              onChange={(event) => setInput(event.currentTarget.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !combobox.dropdownOpened) handleSend();
+              }}
+              placeholder="Message, or type @ to choose a device..."
+              leftSection={(
+                <FileButton onChange={setSelectedFile}>
+                  {(props) => (
+                    <Tooltip label="Attach file">
+                      <ActionIcon {...props} variant="subtle" color="gray" aria-label="Attach file">
+                        <Paperclip size={18} />
+                      </ActionIcon>
+                    </Tooltip>
+                  )}
+                </FileButton>
+              )}
+              rightSection={(
+                <Tooltip label="Send message">
+                  <ActionIcon
+                    color="teal"
+                    aria-label="Send message"
+                    disabled={!input.trim() && !selectedFile}
+                    onClick={handleSend}
+                  >
+                    <Send size={18} />
+                  </ActionIcon>
+                </Tooltip>
+              )}
+              size="lg"
+              radius="md"
+            />
+          </Combobox.DropdownTarget>
+          <Combobox.Dropdown hidden={!mentionOptions.length}>
+            <Combobox.Options>
+              {mentionOptions.map(device => (
+                <Combobox.Option key={device.id} value={device.id}>
+                  <Group gap="sm" wrap="nowrap">
+                    <ThemeIcon variant="light" color="teal" size="sm">
+                      <Monitor size={14} />
+                    </ThemeIcon>
+                    <Box flex={1} miw={0}>
+                      <Text size="sm" fw={600} truncate>{device.name}</Text>
+                      <Text size="xs" c="dimmed" ff="monospace" truncate>{device.id}</Text>
+                    </Box>
+                    <Badge size="xs" variant="light" color={device.status === 'online' ? 'green' : 'gray'}>{device.status}</Badge>
+                  </Group>
+                </Combobox.Option>
+              ))}
+            </Combobox.Options>
+          </Combobox.Dropdown>
+        </Combobox>
+      </Stack>
+    </Stack>
   );
+}
+
+const MessageRow: FC<{ message: ChatMessage; onFollowUp: (content: string) => void }> = ({ message, onFollowUp }) => {
+  const isUser = message.role === 'user';
+  return (
+    <Group align="flex-end" justify={isUser ? 'flex-end' : 'flex-start'} gap="sm" wrap="nowrap">
+      {!isUser && (
+        <Avatar radius="xl" color={message.role === 'system' ? 'teal' : undefined}>
+          {message.role === 'system' ? <ArrowDownLeft size={16} /> : <AppIcon className="h-7 w-7" />}
+        </Avatar>
+      )}
+
+      <Stack gap={6} align={isUser ? 'flex-end' : 'flex-start'} maw={isUser ? '78%' : '84%'}>
+        {message.attachment && (
+          <Paper withBorder radius="md" p="xs">
+            <Group gap="sm" wrap="nowrap">
+              <ThemeIcon color="teal" variant="light"><FileText size={16} /></ThemeIcon>
+              <Box miw={0}>
+                <Text size="xs" fw={600} truncate>{message.attachment.name}</Text>
+                <Text size="xs" c="dimmed">{message.attachment.size}</Text>
+              </Box>
+            </Group>
+          </Paper>
+        )}
+
+        <Paper
+          withBorder={!isUser}
+          radius="lg"
+          p="md"
+          bg={isUser ? 'dark.8' : undefined}
+          c={isUser ? 'white' : undefined}
+        >
+          {message.isThinking ? (
+            <Group gap="xs">
+              <Loader size="xs" />
+              <Text size="sm" fw={500}>Working...</Text>
+            </Group>
+          ) : (
+            <Text size="sm" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{message.content}</Text>
+          )}
+        </Paper>
+
+        {message.taskProposal && <TaskProposalCard proposal={message.taskProposal} />}
+
+        {message.followUpOptions && message.taskProposal?.status === 'completed' && (
+          <Group gap="xs">
+            {message.followUpOptions.map(option => (
+              <Badge key={option} component="button" variant="light" onClick={() => onFollowUp(option)}>
+                {option}
+              </Badge>
+            ))}
+          </Group>
+        )}
+      </Stack>
+
+      {isUser && (
+        <Avatar radius="xl" color="dark">
+          <User size={16} />
+        </Avatar>
+      )}
+    </Group>
+  );
+};
+
+function TaskProposalCard({ proposal }: { proposal: NonNullable<ChatMessage['taskProposal']> }) {
+  const isIncoming = proposal.direction === 'incoming';
+  return (
+    <Paper withBorder radius="md" p="md" maw={460}>
+      <Stack gap="sm">
+        <Group justify="space-between" gap="md">
+          <Text size="xs" fw={700} tt="uppercase" c="dimmed">
+            {isIncoming ? 'Incoming Task' : 'Task Execution'}
+          </Text>
+          <Badge
+            color={proposal.status === 'completed' ? 'green' : 'blue'}
+            leftSection={proposal.status === 'completed' ? <CheckCircle2 size={12} /> : <Loader size={10} />}
+          >
+            {proposal.status}
+          </Badge>
+        </Group>
+        <Group justify="space-between" align="center" wrap="nowrap">
+          <Group gap="xs">
+            <ThemeIcon variant="light" color={isIncoming ? 'teal' : 'gray'}><Monitor size={16} /></ThemeIcon>
+            <ThemeIcon variant="light" color={isIncoming ? 'gray' : 'teal'}><Laptop size={16} /></ThemeIcon>
+          </Group>
+          <Box ta="right" miw={0}>
+            <Text size="sm" fw={600} truncate>{proposal.targetDeviceName}</Text>
+            <Text size="xs" c="dimmed" ff="monospace" truncate>{proposal.targetDeviceId}</Text>
+          </Box>
+        </Group>
+        <Paper radius="md" p="sm" style={{ background: 'var(--agswarm-surface-muted)' }}>
+          <Group justify="space-between">
+            <Text size="xs" c="dimmed" fw={600}>Action</Text>
+            <Text size="xs" fw={700}>{proposal.taskType}</Text>
+          </Group>
+          <Text mt={4} size="xs" ff="monospace" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+            {proposal.payload}
+          </Text>
+        </Paper>
+        {proposal.result && (
+          <Paper withBorder radius="md" p="sm">
+            <Text size="xs" fw={700} c="green">Result</Text>
+            <Text mt={4} size="xs" ff="monospace" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{proposal.result}</Text>
+            {proposal.preview && (
+              <Group mt="sm" gap="xs">
+                <ImageIcon size={14} />
+                <Text size="xs" truncate>{proposal.preview.name}</Text>
+              </Group>
+            )}
+          </Paper>
+        )}
+      </Stack>
+    </Paper>
+  );
+}
+
+function getMentionQuery(input: string): string | null {
+  const match = input.match(/(?:^|\s)@([^\s@]*)$/);
+  return match ? match[1] : null;
+}
+
+function replaceActiveMention(input: string, value: string): string {
+  return input.replace(/(?:^|\s)@([^\s@]*)$/, match => {
+    const leadingSpace = match.startsWith(' ') ? ' ' : '';
+    return `${leadingSpace}@${value} `;
+  });
 }

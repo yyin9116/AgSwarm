@@ -8,7 +8,7 @@
 2. 节点侧 runtime/daemon/bridge 已支持并发、重试、取消、状态上报。
 3. CLI 与 Tauri 桌面客户端可发起/展示多设备任务；旧 PySide6 桌面端仅保留为迁移期兼容面。
 4. Agent skills 配置已接入 runtime（默认/显式/关键词自动触发）。
-5. 节点快照现已暴露 OpenClaw Node 主机层配置，CLI 可通过现有 NATS 控制面向启用 `pi` adapter 的设备节点提交任务。
+5. 节点快照现已暴露 AgSwarm Peer 能力信息，CLI 可通过现有 NATS 控制面向启用 `pi` adapter 的设备节点提交任务。
 
 未完成：跨机稳定性回归、下载回传、桌面端通知中心与托盘、签名发布。
 
@@ -89,7 +89,7 @@ $env:PYTHONPATH = "src"
 python -m workflow_cli submit-echo --node-id node-a --nats-url nats://127.0.0.1:4222 --text "hello workflow" --skills safe_default
 ```
 
-Pi agent harness（`earendil-works/pi`）/ OpenClaw 首个集成切片（当前是 OpenClaw 主机/设备发现 + NATS 控制面；独立 OpenClaw 设备协议仍待接入）：
+Pi agent harness（`earendil-works/pi`）/ AgSwarm Peer 集成切片（内置 peer 节点发现 + NATS 控制面）：
 
 ```bash
 PYTHONPATH=src python -m workflow_cli node \
@@ -98,9 +98,8 @@ PYTHONPATH=src python -m workflow_cli node \
   --enable-pi \
   --pi-provider anthropic \
   --pi-model anthropic/claude-sonnet-4 \
-  --openclaw-device-label "Pi edge worker" \
-  --openclaw-device-tags edge,lab \
-  --openclaw-gateway-command "/path/to/openclaw-gateway"
+  --peer-device-label "Pi edge worker" \
+  --peer-device-tags edge,lab
 
 PYTHONPATH=src python -m workflow_cli submit-pi \
   --device-id node-pi \
@@ -109,22 +108,22 @@ PYTHONPATH=src python -m workflow_cli submit-pi \
   --skills safe_default
 ```
 
-提交任务前可先检查 OpenClaw 主机通信层：
+提交任务前可先检查 peer 通信层：
 
 ```bash
-PYTHONPATH=src python -m workflow_cli openclaw-ping --device-id node-pi
+PYTHONPATH=src python -m workflow_cli peer-ping --device-id node-pi
 ```
 
-也可以向外部 OpenClaw gateway 发送命令：
+也可以向 peer 发送轻量内置命令：
 
 ```bash
-PYTHONPATH=src python -m workflow_cli openclaw-command \
+PYTHONPATH=src python -m workflow_cli peer-command \
   --device-id node-pi \
-  device.status \
+  describe \
   --payload '{"detail": true}'
 ```
 
-带 `--device-id` 时，控制端会短暂监听节点状态并解析到具备对应能力的匹配节点；`openclaw-ping` 会向节点的 OpenClaw command subject 发 request/reply 控制消息，`submit-pi` 会解析到具备 `pi-agent` 能力的节点后再提交任务。`--openclaw-gateway-command` 接收 JSON stdin 并输出 JSON stdout，可包装真实 OpenClaw Node CLI/daemon。Pi 运行时密钥应在节点进程环境中配置，不要通过任务参数或命令行转发。可通过 `python -m workflow_cli node-snapshot --node-id node-pi` 查看节点暴露的 `openclaw_node` 通信/能力信息。
+带 `--device-id` 时，控制端会短暂监听节点状态并解析到具备对应能力的匹配节点；`peer-ping` 会向节点的 peer command subject 发 request/reply 控制消息，`submit-pi` 会解析到具备 `pi-agent` 能力的节点后再提交任务。Pi 运行时密钥应在节点进程环境中配置，不要通过任务参数或命令行转发。可通过 `python -m workflow_cli node-snapshot --node-id node-pi` 查看节点暴露的 `peer_node` 通信/能力信息。
 
 Mac->Win 一键回归（在 Mac 侧）：
 

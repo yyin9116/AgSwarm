@@ -150,7 +150,7 @@ class WorkflowControlClient:
             timeout_sec=timeout_sec,
         )
 
-    async def discover_openclaw_nodes(
+    async def discover_peer_nodes(
         self,
         *,
         timeout_sec: float = 1.0,
@@ -163,10 +163,10 @@ class WorkflowControlClient:
 
         async def _on_status(_: str, payload: dict) -> None:
             node_id = payload.get("node_id")
-            openclaw = payload.get("openclaw_node")
-            if not isinstance(node_id, str) or not isinstance(openclaw, dict):
+            peer = payload.get("peer_node")
+            if not isinstance(node_id, str) or not isinstance(peer, dict):
                 return
-            capabilities = openclaw.get("capabilities")
+            capabilities = peer.get("capabilities")
             capability_set = {str(x) for x in capabilities} if isinstance(capabilities, list) else set()
             if not required.issubset(capability_set):
                 return
@@ -179,7 +179,7 @@ class WorkflowControlClient:
             await sub.unsubscribe()
         return [nodes_by_id[key] for key in sorted(nodes_by_id)]
 
-    async def resolve_openclaw_device_node(
+    async def resolve_peer_device_node(
         self,
         *,
         device_id: str,
@@ -189,29 +189,29 @@ class WorkflowControlClient:
         wanted = device_id.strip()
         if not wanted:
             raise ValueError("device_id is required")
-        nodes = await self.discover_openclaw_nodes(
+        nodes = await self.discover_peer_nodes(
             timeout_sec=timeout_sec,
             require_capabilities=require_capabilities,
         )
         matches: list[dict] = []
         for node in nodes:
-            openclaw = node.get("openclaw_node")
-            if not isinstance(openclaw, dict):
+            peer = node.get("peer_node")
+            if not isinstance(peer, dict):
                 continue
             candidates = {
                 str(node.get("node_id") or ""),
-                str(openclaw.get("device_id") or ""),
+                str(peer.get("device_id") or ""),
             }
             if wanted in candidates:
                 matches.append(node)
         if not matches:
-            raise LookupError(f"No OpenClaw node found for device_id={wanted!r}")
+            raise LookupError(f"No peer node found for device_id={wanted!r}")
         if len(matches) > 1:
             node_ids = sorted(str(item.get("node_id")) for item in matches)
-            raise LookupError(f"Multiple OpenClaw nodes found for device_id={wanted!r}: {node_ids}")
+            raise LookupError(f"Multiple peer nodes found for device_id={wanted!r}: {node_ids}")
         return matches[0]
 
-    async def request_openclaw_command(
+    async def request_peer_command(
         self,
         *,
         node_id: str,
@@ -222,7 +222,7 @@ class WorkflowControlClient:
         if not command.strip():
             raise ValueError("command is required")
         return await self.transport.request(
-            subjects.openclaw_command_request(node_id),
+            subjects.peer_command_request(node_id),
             {
                 "from_client_id": self.client_id,
                 "command": command,
@@ -812,10 +812,12 @@ class WorkflowControlClient:
         task: TaskEnvelope,
         timeout_sec: float = 120.0,
         terminal_grace_sec: float = 0.6,
+        event_handler: EventHandler | None = None,
     ) -> dict:
         done = asyncio.Event()
         terminal_event: dict | None = None
         user_messages: list[dict] = []
+        events: list[dict] = []
         terminal_deadline: float | None = None
         logger.info(
             "run task wait start client_id=%s node_id=%s task_id=%s timeout_sec=%.2f",
@@ -830,6 +832,10 @@ class WorkflowControlClient:
             nonlocal terminal_deadline
             if event.task_id != task.task_id:
                 return
+            event_dict = event.to_dict()
+            events.append(event_dict)
+            if event_handler is not None:
+                await event_handler(event)
             if event.type == "task.user_message":
                 user_messages.append(dict(event.payload))
                 logger.info(
@@ -841,7 +847,7 @@ class WorkflowControlClient:
                     done.set()
                 return
             if event.type in {"adapter.completed", "adapter.error"}:
-                terminal_event = event.to_dict()
+                terminal_event = event_dict
                 logger.info(
                     "task terminal event task_id=%s type=%s",
                     task.task_id,
@@ -876,6 +882,8 @@ class WorkflowControlClient:
                 "task_id": task.task_id,
                 "status": "timeout",
                 "user_messages": user_messages,
+                "events": events,
+                "assistant_text": _extract_assistant_text(events),
                 "terminal_event": None,
             }
 
@@ -911,6 +919,8 @@ class WorkflowControlClient:
             "task_id": task.task_id,
             "status": status,
             "user_messages": user_messages,
+            "events": events,
+            "assistant_text": _extract_assistant_text(events),
             "terminal_event": terminal_event,
         }
 
@@ -922,6 +932,71 @@ def _safe_download_name(source_path: str, download_id: str) -> str:
         if name:
             return name
     return f"download-{download_id}"
+
+
+def _extract_assistant_text(events: list[dict]) -> str:
+    for event in reversed(events):
+        if event.get("type") == "agent.end":
+            text = _text_from_agent_end(event.get("payload"))
+            if text:
+                return text
+    for event in reversed(events):
+        if event.get("type") == "agent.turn_end":
+            text = _text_from_payload(event.get("payload", {}).get("message"))
+            if text:
+                return text
+    token_text = "".join(
+        _token_text_from_payload(event.get("payload", {}).get("text"))
+        for event in events
+        if event.get("type") == "agent.token"
+    ).strip()
+    if token_text:
+        return token_text
+    for event in reversed(events):
+        if event.get("type") == "adapter.completed":
+            text = _text_from_payload(event.get("payload", {}).get("output"))
+            if text:
+                return text
+    return ""
+
+
+def _text_from_agent_end(payload: object) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return ""
+    for item in reversed(messages):
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role", "")).lower()
+        if role and role != "assistant":
+            continue
+        text = _text_from_payload(item.get("content") or item.get("message") or item.get("text"))
+        if text:
+            return text
+    return ""
+
+
+def _text_from_payload(value: object) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        return "\n".join(filter(None, (_text_from_payload(item) for item in value))).strip()
+    if isinstance(value, dict):
+        return _text_from_payload(
+            value.get("text")
+            or value.get("content")
+            or value.get("message")
+            or value.get("output")
+        )
+    return ""
+
+
+def _token_text_from_payload(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    return _text_from_payload(value)
 
 
 def _unique_local_path(path: Path) -> Path:
