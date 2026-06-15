@@ -120,21 +120,11 @@ jobs:
             sidecar_target: aarch64-apple-darwin
             tauri_args: --target aarch64-apple-darwin
             artifact_name: agswarm-client-macos-aarch64
-          - label: macOS Intel
-            os: macos-15
-            sidecar_target: x86_64-apple-darwin
-            tauri_args: --target x86_64-apple-darwin
-            artifact_name: agswarm-client-macos-x86_64
           - label: Windows x64
             os: windows-2022
             sidecar_target: x86_64-pc-windows-msvc
             tauri_args: ""
             artifact_name: agswarm-client-windows-x86_64
-          - label: Linux x64
-            os: ubuntu-24.04
-            sidecar_target: x86_64-unknown-linux-gnu
-            tauri_args: --bundles deb
-            artifact_name: agswarm-client-linux-x86_64
 
     runs-on: ${{ matrix.os }}
     steps:
