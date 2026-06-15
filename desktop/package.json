@@ -9,6 +9,8 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
+    "check:sidecars": "node scripts/check-tauri-sidecars.mjs",
+    "check:sidecars:all": "node scripts/check-tauri-sidecars.mjs --all",
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",

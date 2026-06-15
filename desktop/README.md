@@ -22,7 +22,42 @@ VITE_AGENT_API_KEY=local-dev-key
 ## Build
 
 ```bash
+npm run check:sidecars
 npm run tauri:build
 ```
 
 macOS bundles are emitted under `src-tauri/target/release/bundle/`.
+
+`tauri:build` runs `check:sidecars` before Vite/Tauri packaging. The packaged
+Ag runtime must use the bundled pi AgentSession bridge and Node runtime; missing
+sidecars are build failures rather than provider/Python fallbacks.
+
+## Platform Sidecars
+
+Current desktop targets expect these executable files under
+`src-tauri/binaries/`:
+
+- `node-aarch64-apple-darwin`
+- `pi-agent-session-bridge-aarch64-apple-darwin`
+- `node-x86_64-apple-darwin`
+- `pi-agent-session-bridge-x86_64-apple-darwin`
+- `node-x86_64-pc-windows-msvc.exe`
+- `pi-agent-session-bridge-x86_64-pc-windows-msvc.exe`
+- `node-x86_64-unknown-linux-gnu`
+- `pi-agent-session-bridge-x86_64-unknown-linux-gnu`
+
+Check the current machine only:
+
+```bash
+npm run check:sidecars
+```
+
+Check all configured desktop targets before release work:
+
+```bash
+npm run check:sidecars:all
+```
+
+Mobile support is currently the responsive web/Tauri WebView surface. Native
+iOS/Android packaging still needs a separate runtime plan because the desktop
+sidecar model cannot be copied directly into mobile sandbox rules.
