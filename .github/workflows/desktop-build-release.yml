@@ -133,7 +133,7 @@ jobs:
           - label: Linux x64
             os: ubuntu-24.04
             sidecar_target: x86_64-unknown-linux-gnu
-            tauri_args: ""
+            tauri_args: --bundles deb
             artifact_name: agswarm-client-linux-x86_64
 
     runs-on: ${{ matrix.os }}
