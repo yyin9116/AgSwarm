@@ -36,6 +36,7 @@
       "binaries/assets",
       "binaries/theme",
       "binaries/pi-web-agswarm-server.mjs",
+      "binaries/pi-web-package",
       "binaries/runtime-node",
       "binaries/pi-web-client",
       "binaries/pi-web-plugins"

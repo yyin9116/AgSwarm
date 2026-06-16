@@ -8,6 +8,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager, Window};
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct CliRequest {
@@ -1360,6 +1363,7 @@ impl ManagedPiWeb {
         let sessiond = Command::new(&node)
             .arg(&sessiond_entry)
             .current_dir(repo_root)
+            .env("PI_WEB_PACKAGE_DIR", &package_dir)
             .env("PI_WEB_DATA_DIR", &data_dir)
             .env("PI_WEB_SESSIOND_SOCKET", &socket_path)
             .env("PI_CODING_AGENT_DIR", pi_coding_agent_dir())
@@ -1378,6 +1382,7 @@ impl ManagedPiWeb {
         let server = Command::new(&node)
             .arg(&server_entry)
             .current_dir(repo_root)
+            .env("PI_WEB_PACKAGE_DIR", &package_dir)
             .env("PI_WEB_HOST", "127.0.0.1")
             .env("PI_WEB_PORT", "8504")
             .env("PI_WEB_DATA_DIR", &data_dir)
@@ -1727,14 +1732,41 @@ fn resolve_pi_web_package_dir(
         candidates.push(PathBuf::from(path));
     }
     if let Ok(resource_dir) = app.path().resource_dir() {
+        candidates.push(resource_dir.join("pi-web-package"));
+        candidates.push(resource_dir.join("binaries").join("pi-web-package"));
         candidates.push(resource_dir.join("binaries").join("runtime-node").join("node_modules").join("@jmfederico").join("pi-web"));
         candidates.push(resource_dir.join("binaries").join("node_modules").join("@jmfederico").join("pi-web"));
-        candidates.push(resource_dir.join("binaries").join("pi-web-package"));
         candidates.push(resource_dir.join("_up_").join("node_modules").join("@jmfederico").join("pi-web"));
         candidates.push(resource_dir.join("node_modules").join("@jmfederico").join("pi-web"));
         candidates.push(resource_dir.join("pi-web"));
         candidates.push(resource_dir.join("binaries").join("pi-web"));
     }
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(exe_dir) = current_exe.parent() {
+            candidates.push(exe_dir.join("pi-web-package"));
+            candidates.push(exe_dir.join("binaries").join("pi-web-package"));
+            if let Some(contents_dir) = exe_dir.parent() {
+                candidates.push(contents_dir.join("Resources").join("pi-web-package"));
+                candidates.push(contents_dir.join("Resources").join("binaries").join("pi-web-package"));
+                candidates.push(
+                    contents_dir
+                        .join("Resources")
+                        .join("binaries")
+                        .join("runtime-node")
+                        .join("node_modules")
+                        .join("@jmfederico")
+                        .join("pi-web"),
+                );
+            }
+        }
+    }
+    candidates.push(
+        repo_root
+            .join("desktop")
+            .join("src-tauri")
+            .join("binaries")
+            .join("pi-web-package"),
+    );
     candidates.push(
         repo_root
             .join("desktop")
@@ -2099,6 +2131,10 @@ impl CommandPathExt for Command {
 
 fn configure_child_env(command: &mut Command) {
     command.env("PATH", child_path_env());
+    #[cfg(windows)]
+    {
+        command.creation_flags(0x08000000);
+    }
 }
 
 fn child_path_env() -> String {
