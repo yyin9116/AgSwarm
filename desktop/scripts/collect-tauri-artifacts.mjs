@@ -13,11 +13,11 @@ const outDir = path.join(repoRoot, 'dist-artifacts');
 
 const args = parseArgs(process.argv.slice(2));
 const target = args.target || process.env.TAURI_SIDECAR_TARGET || '';
-const label = args.label || target || `${os.platform()}-${os.arch()}`;
+const label = args.label || labelForTarget(target) || `${os.platform()}-${os.arch()}`;
+const releaseName = sanitizeName(args.releaseName || process.env.AG_SWARM_RELEASE_NAME || 'AgSwarm');
 const releaseDirs = [
-  target ? path.join(desktopDir, 'src-tauri', 'target', target, 'release', 'bundle') : '',
-  path.join(desktopDir, 'src-tauri', 'target', 'release', 'bundle'),
-].filter(Boolean);
+  path.join(desktopDir, 'src-tauri', 'target', ...(target ? [target] : []), 'release', 'bundle'),
+];
 
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
@@ -88,10 +88,27 @@ async function zipMacApps(directory) {
 
 function normalizeName(fileName) {
   const extension = path.extname(fileName);
-  const base = path.basename(fileName, extension)
+  const base = [releaseName, sanitizeName(label)].filter(Boolean).join('-');
+  if (extension === '.zip' && fileName.endsWith('.app.zip')) return `${base}.app.zip`;
+  if (extension === '.exe') return `${base}-Setup.exe`;
+  if (extension) return `${base}${extension}`;
+  return `${base}-${sanitizeName(path.basename(fileName))}`;
+}
+
+function labelForTarget(value) {
+  const labels = {
+    'aarch64-apple-darwin': 'macOS-Apple-Silicon',
+    'x86_64-pc-windows-msvc': 'Windows-x64',
+  };
+  return labels[value] || value;
+}
+
+function sanitizeName(value) {
+  return String(value)
+    .trim()
+    .replace(/&/g, 'and')
     .replace(/\s+/g, '-')
     .replace(/[^a-zA-Z0-9._-]/g, '');
-  return `${base}-${label}${extension}`;
 }
 
 function run(command, commandArgs, options = {}) {

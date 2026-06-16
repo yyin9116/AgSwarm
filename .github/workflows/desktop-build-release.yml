@@ -119,12 +119,12 @@ jobs:
             os: macos-15
             sidecar_target: aarch64-apple-darwin
             tauri_args: --target aarch64-apple-darwin
-            artifact_name: agswarm-client-macos-aarch64
+            artifact_name: macOS-Apple-Silicon
           - label: Windows x64
             os: windows-2022
             sidecar_target: x86_64-pc-windows-msvc
             tauri_args: ""
-            artifact_name: agswarm-client-windows-x86_64
+            artifact_name: Windows-x64
 
     runs-on: ${{ matrix.os }}
     steps:
