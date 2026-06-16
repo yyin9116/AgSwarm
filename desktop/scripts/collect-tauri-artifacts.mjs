@@ -30,7 +30,8 @@ for (const releaseDir of releaseDirs) {
   const before = copied.length;
   if (isMacLabel(label)) {
     await copyMatching(path.join(releaseDir, 'dmg'), ['.dmg']);
-    await copyMatching(path.join(releaseDir, 'dmg'), ['.sig'], { signatureFor: '.dmg' });
+    await copyMatching(path.join(releaseDir, 'macos'), ['.app.tar.gz']);
+    await copyMatching(path.join(releaseDir, 'macos'), ['.app.tar.gz.sig'], { signatureFor: '.app.tar.gz' });
     await zipMacApps(path.join(releaseDir, 'macos'));
   } else if (isWindowsLabel(label)) {
     await copyMatching(path.join(releaseDir, 'nsis'), ['.exe']);
@@ -100,6 +101,12 @@ async function zipMacApps(directory) {
 }
 
 function normalizeName(fileName, options = {}) {
+  if (fileName.endsWith('.app.tar.gz.sig')) {
+    return `${[releaseName, sanitizeName(label)].filter(Boolean).join('-')}.app.tar.gz.sig`;
+  }
+  if (fileName.endsWith('.app.tar.gz')) {
+    return `${[releaseName, sanitizeName(label)].filter(Boolean).join('-')}.app.tar.gz`;
+  }
   const extension = path.extname(fileName);
   const base = [releaseName, sanitizeName(label)].filter(Boolean).join('-');
   if (extension === '.sig' && options.signatureFor) {
