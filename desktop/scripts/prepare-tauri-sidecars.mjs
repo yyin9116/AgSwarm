@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createWriteStream, existsSync, mkdirSync, rmSync, chmodSync } from 'node:fs';
-import { access, cp, readFile, writeFile } from 'node:fs/promises';
+import { access, cp, lstat, readdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
@@ -151,6 +151,7 @@ async function preparePiWebRuntime(target) {
     ? ['ci', '--include=optional']
     : ['install', '--include=optional'];
   run('npm', npmArgs, { cwd: runtimeDir });
+  await pruneRuntimeDevelopmentFiles(runtimeDir);
 
   await access(path.join(piWebPackageDir, 'dist', 'server', 'index.js'));
   await access(path.join(piWebPackageDir, 'dist', 'server', 'sessiond.js'));
@@ -165,6 +166,42 @@ async function preparePiWebRuntime(target) {
 
   await writePreparedTargetMarker(target);
   console.log(`pi-web runtime ready for ${target}: ${runtimeDir}`);
+}
+
+async function pruneRuntimeDevelopmentFiles(rootDir) {
+  const removed = {
+    declarations: 0,
+    sourceMaps: 0,
+  };
+  await walkRuntimeFiles(rootDir, async filePath => {
+    if (filePath.endsWith('.d.ts')) {
+      await unlink(filePath);
+      removed.declarations += 1;
+      return;
+    }
+    if (filePath.endsWith('.d.ts.map') || filePath.endsWith('.js.map') || filePath.endsWith('.mjs.map')) {
+      await unlink(filePath);
+      removed.sourceMaps += 1;
+    }
+  });
+  console.log(
+    `Pruned runtime development files: ${removed.declarations} declarations, ${removed.sourceMaps} source maps.`,
+  );
+}
+
+async function walkRuntimeFiles(directory, visit) {
+  const entries = await readdir(directory, { withFileTypes: true });
+  for (const entry of entries) {
+    const filePath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      await walkRuntimeFiles(filePath, visit);
+      continue;
+    }
+    if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+    const fileStat = await lstat(filePath);
+    if (!fileStat.isFile()) continue;
+    await visit(filePath);
+  }
 }
 
 async function copyPackageForDiagnostics(source, destination) {
