@@ -23,6 +23,24 @@ def node_snapshot_request(node_id: str) -> str:
     return f"{ROOT}.nodes.{node_id}.snapshot.request"
 
 
+def node_config_sync_request(node_id: str) -> str:
+    return f"{ROOT}.nodes.{node_id}.config.sync"
+
+
+def client_presence(client_id: str | None = None) -> str:
+    if client_id:
+        return f"{ROOT}.clients.{client_id}.presence"
+    return f"{ROOT}.clients.*.presence"
+
+
+def client_inbox(client_id: str) -> str:
+    return f"{ROOT}.clients.{client_id}.inbox"
+
+
+def peer_command_request(node_id: str) -> str:
+    return f"{ROOT}.nodes.{node_id}.peer.command"
+
+
 def file_prepare_request(node_id: str) -> str:
     return f"{ROOT}.nodes.{node_id}.files.prepare"
 

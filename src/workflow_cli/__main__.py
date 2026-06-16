@@ -5,11 +5,18 @@ import asyncio
 import json
 import logging
 import os
+from dataclasses import asdict
 
+from workflow_discovery import (
+    DISCOVERY_BROADCAST_DEFAULT,
+    DISCOVERY_PORT_DEFAULT,
+    LanNodeBroadcaster,
+    resolve_advertise_nats_url,
+)
 from workflow_control_client import WorkflowControlClient
 from workflow_logging import setup_logging
-from workflow_node_daemon import NatsDaemonBridge, WorkflowNodeDaemon
-from workflow_runtime.adapters import LatexMcpAdapter
+from workflow_node_daemon import NatsDaemonBridge, PeerNodeConfig, WorkflowNodeDaemon
+from workflow_runtime.adapters import LatexMcpAdapter, PiAdapter
 from workflow_runtime.adapters.base import Adapter
 from workflow_runtime.error_codes import build_error_summary
 from workflow_runtime.event_sink import EventSink
@@ -18,6 +25,13 @@ from workflow_runtime.runtime import Runtime
 from workflow_transport import NatsTransportProvider
 
 logger = logging.getLogger(__name__)
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _parse_skills(raw: str | None) -> list[str]:
@@ -42,6 +56,13 @@ def _print_error_and_exit(exc: Exception, *, context: dict | None = None) -> Non
     raise SystemExit(2)
 
 
+def _print_stream_event(kind: str, payload: dict) -> None:
+    print(
+        json.dumps({"stream": True, "kind": kind, "payload": payload}, ensure_ascii=False),
+        flush=True,
+    )
+
+
 class EchoAdapter(Adapter):
     name = "echo"
 
@@ -51,21 +72,90 @@ class EchoAdapter(Adapter):
         await sink.emit("adapter.completed", {"output": task.input_text, "progress": 100})
 
 
+def _parse_csv(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+
+def _build_runtime_adapters(args: argparse.Namespace) -> list[Adapter]:
+    adapters: list[Adapter] = [
+        EchoAdapter(),
+        LatexMcpAdapter(
+            default_workspace=args.latex_workspace,
+            default_server_cwd=args.latex_server_cwd,
+        ),
+    ]
+    if args.enable_pi:
+        adapters.append(
+            PiAdapter(
+                pi_cli=args.pi_cli,
+                default_model=args.pi_model,
+                provider=args.pi_provider,
+                cwd=args.pi_cwd,
+            )
+        )
+    return adapters
+
+
+def _arg_value(args: argparse.Namespace, name: str) -> str | None:
+    value = getattr(args, name, None)
+    if value not in (None, ""):
+        return value
+    return None
+
+
+def _build_peer_config(args: argparse.Namespace) -> PeerNodeConfig:
+    capabilities = _parse_csv(_arg_value(args, "peer_capabilities"))
+    if args.enable_pi and "pi-agent" not in capabilities:
+        capabilities.append("pi-agent")
+    return PeerNodeConfig(
+        transport=_arg_value(args, "peer_transport") or "nats",
+        endpoint=_arg_value(args, "peer_endpoint") or args.nats_url,
+        device_id=_arg_value(args, "peer_device_id") or args.node_id,
+        device_label=_arg_value(args, "peer_device_label"),
+        device_tags=_parse_csv(_arg_value(args, "peer_device_tags")),
+        capabilities=capabilities,
+    )
+
+
+def _build_pi_task(args: argparse.Namespace) -> TaskEnvelope:
+    metadata: dict[str, object] = {
+        "target_device": args.device_id or args.node_id,
+        "target_host_layer": "agswarm_peer",
+        "target_transport": "nats",
+        "submission_channel": "workflow_cli.submit-pi",
+    }
+    selected_skills = _parse_skills(args.skills)
+    if selected_skills:
+        metadata["skills"] = selected_skills
+    if args.session_label:
+        metadata["session_label"] = args.session_label
+
+    options: dict[str, object] = {"no_session": not args.allow_session}
+    if args.device_id:
+        options["device_id"] = args.device_id
+    if args.file_root:
+        options["file_root"] = args.file_root
+
+    return TaskEnvelope(
+        adapter=AdapterConfig(name="pi", model=args.model, options=options),
+        input_text=args.prompt,
+        controls={"stream": True, "timeout_ms": args.timeout_ms, "max_steps": args.max_steps},
+        metadata=metadata,
+    )
+
+
 async def cmd_node(args: argparse.Namespace) -> None:
     runtime = Runtime(
-        adapters=[
-            EchoAdapter(),
-            LatexMcpAdapter(
-                default_workspace=args.latex_workspace,
-                default_server_cwd=args.latex_server_cwd,
-            ),
-        ],
+        adapters=_build_runtime_adapters(args),
         skill_catalog_path=args.skills_config,
     )
     daemon = WorkflowNodeDaemon(
         runtime,
         max_concurrency=args.max_concurrency,
         default_retries=args.default_retries,
+        peer_config=_build_peer_config(args),
     )
     transport = NatsTransportProvider(server_url=args.nats_url)
     bridge = NatsDaemonBridge(
@@ -73,9 +163,26 @@ async def cmd_node(args: argparse.Namespace) -> None:
         daemon=daemon,
         transport=transport,
     )
+    broadcaster: LanNodeBroadcaster | None = None
 
     await daemon.start()
     await bridge.start()
+    discovery_enabled = not bool(args.disable_discovery)
+    advertise_nats_url = ""
+    if discovery_enabled:
+        advertise_nats_url = resolve_advertise_nats_url(
+            args.nats_url,
+            explicit_advertise_url=(args.advertise_nats_url or None),
+        )
+        broadcaster = LanNodeBroadcaster(
+            node_id=args.node_id,
+            nats_url=advertise_nats_url,
+            port=max(1, int(args.discovery_port)),
+            broadcast_addr=str(args.discovery_broadcast),
+            interval_sec=max(0.5, float(args.discovery_interval_sec)),
+            snapshot_provider=lambda: asdict(daemon.get_node_snapshot()),
+        )
+        await broadcaster.start()
     print(
         json.dumps(
             {
@@ -86,7 +193,17 @@ async def cmd_node(args: argparse.Namespace) -> None:
                 "default_retries": args.default_retries,
                 "latex_workspace": args.latex_workspace,
                 "latex_server_cwd": args.latex_server_cwd,
+                "enable_pi": args.enable_pi,
+                "pi_provider": args.pi_provider,
+                "pi_model": args.pi_model,
+                "pi_cwd": args.pi_cwd,
+                "peer_node": _build_peer_config(args).describe(adapters=runtime.adapter_names()),
                 "skills_config": args.skills_config,
+                "discovery_enabled": discovery_enabled,
+                "discovery_port": int(args.discovery_port),
+                "discovery_broadcast": str(args.discovery_broadcast),
+                "discovery_interval_sec": float(args.discovery_interval_sec),
+                "advertise_nats_url": advertise_nats_url if discovery_enabled else "",
             },
             ensure_ascii=False,
         )
@@ -95,6 +212,8 @@ async def cmd_node(args: argparse.Namespace) -> None:
         while True:
             await asyncio.sleep(60)
     finally:
+        if broadcaster is not None:
+            await broadcaster.stop()
         await bridge.stop()
         await daemon.stop()
 
@@ -164,6 +283,50 @@ async def cmd_submit_latex(args: argparse.Namespace) -> None:
             timeout_sec=args.wait_timeout_sec,
         )
         result = _attach_error_summary(result)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    finally:
+        await client.close()
+
+
+async def cmd_submit_pi(args: argparse.Namespace) -> None:
+    client = await _with_client(args)
+    try:
+        task = _build_pi_task(args)
+        target_node_id = args.node_id
+        if args.device_id:
+            try:
+                resolved = await client.resolve_peer_device_node(
+                    device_id=args.device_id,
+                    timeout_sec=args.discovery_timeout_sec,
+                    require_capabilities=["pi-agent"],
+                )
+            except Exception as exc:
+                _print_error_and_exit(
+                    exc,
+                    context={
+                        "command": "submit-pi",
+                        "device_id": args.device_id,
+                        "node_id": args.node_id,
+                    },
+                )
+            resolved_node_id = resolved.get("node_id")
+            if isinstance(resolved_node_id, str) and resolved_node_id:
+                target_node_id = resolved_node_id
+                task.metadata["resolved_node_id"] = target_node_id
+        async def _on_stream_event(event) -> None:
+            if args.stream_events:
+                _print_stream_event("event", event.to_dict())
+
+        result = await client.run_task_and_wait(
+            target_node_id=target_node_id,
+            task=task,
+            timeout_sec=args.wait_timeout_sec,
+            event_handler=_on_stream_event if args.stream_events else None,
+        )
+        result = _attach_error_summary(result)
+        if args.stream_events:
+            _print_stream_event("result", result)
+            return
         print(json.dumps(result, ensure_ascii=False, indent=2))
     finally:
         await client.close()
@@ -279,6 +442,104 @@ async def cmd_node_snapshot(args: argparse.Namespace) -> None:
         await client.close()
 
 
+async def cmd_discover_nodes(args: argparse.Namespace) -> None:
+    client = await _with_client(args)
+    try:
+        nodes = await client.discover_peer_nodes(
+            timeout_sec=args.timeout_sec,
+            require_capabilities=_parse_csv(args.require_capabilities),
+        )
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "count": len(nodes),
+                    "nodes": nodes,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    finally:
+        await client.close()
+
+
+async def _resolve_peer_target_node(args: argparse.Namespace, client: WorkflowControlClient) -> str:
+    target_node_id = args.node_id
+    if args.device_id:
+        resolved = await client.resolve_peer_device_node(
+            device_id=args.device_id,
+            timeout_sec=args.discovery_timeout_sec,
+            require_capabilities=_parse_csv(args.require_capabilities),
+        )
+        resolved_node_id = resolved.get("node_id")
+        if not isinstance(resolved_node_id, str) or not resolved_node_id:
+            raise LookupError(f"Resolved peer device has no node_id: {args.device_id}")
+        target_node_id = resolved_node_id
+    return target_node_id
+
+
+async def cmd_peer_ping(args: argparse.Namespace) -> None:
+    client = await _with_client(args)
+    try:
+        try:
+            target_node_id = await _resolve_peer_target_node(args, client)
+            response = await client.request_peer_command(
+                node_id=target_node_id,
+                command="ping",
+                payload={"device_id": args.device_id} if args.device_id else {},
+                timeout_sec=args.timeout_sec,
+            )
+        except Exception as exc:
+            _print_error_and_exit(
+                exc,
+                context={
+                    "command": args.command,
+                    "node_id": args.node_id,
+                    "device_id": args.device_id,
+                },
+            )
+        print(json.dumps(response, ensure_ascii=False, indent=2))
+    finally:
+        await client.close()
+
+
+def _parse_json_object(raw: str | None) -> dict:
+    if not raw:
+        return {}
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise ValueError("payload must be a JSON object")
+    return data
+
+
+async def cmd_peer_command(args: argparse.Namespace) -> None:
+    client = await _with_client(args)
+    try:
+        try:
+            payload = _parse_json_object(args.payload)
+            target_node_id = await _resolve_peer_target_node(args, client)
+            response = await client.request_peer_command(
+                node_id=target_node_id,
+                command=args.peer_command,
+                payload=payload,
+                timeout_sec=args.timeout_sec,
+            )
+        except Exception as exc:
+            _print_error_and_exit(
+                exc,
+                context={
+                    "command": args.command,
+                    "node_id": args.node_id,
+                    "device_id": args.device_id,
+                    "peer_command": args.peer_command,
+                },
+            )
+        print(json.dumps(response, ensure_ascii=False, indent=2))
+    finally:
+        await client.close()
+
+
 def _parse_required_adapters(raw: str) -> list[str]:
     if not raw:
         return []
@@ -335,7 +596,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.getenv("WORKFLOW_LOG_FILE"),
         help="Optional log file path for rotating logs.",
     )
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command", required=True, metavar="command")
 
     node = sub.add_parser("node", help="Run node daemon bridge")
     node.add_argument("--node-id", default="node-a")
@@ -344,6 +605,53 @@ def build_parser() -> argparse.ArgumentParser:
     node.add_argument("--default-retries", type=int, default=1)
     node.add_argument("--latex-workspace", default=None)
     node.add_argument("--latex-server-cwd", default=None)
+    node.add_argument("--enable-pi", action="store_true", help="Register the pi runtime adapter on this node.")
+    node.add_argument("--pi-cli", default=os.getenv("WORKFLOW_PI_CLI"))
+    node.add_argument("--pi-model", default=os.getenv("WORKFLOW_PI_MODEL"))
+    node.add_argument("--pi-provider", default=os.getenv("WORKFLOW_PI_PROVIDER"))
+    node.add_argument("--pi-cwd", default=os.getenv("WORKFLOW_PI_CWD"))
+    node.add_argument("--peer-transport", default=os.getenv("WORKFLOW_PEER_TRANSPORT", "nats"))
+    node.add_argument("--peer-endpoint", default=os.getenv("WORKFLOW_PEER_ENDPOINT"))
+    node.add_argument("--peer-device-id", default=os.getenv("WORKFLOW_PEER_DEVICE_ID"))
+    node.add_argument("--peer-device-label", default=os.getenv("WORKFLOW_PEER_DEVICE_LABEL"))
+    node.add_argument(
+        "--peer-device-tags",
+        default=os.getenv("WORKFLOW_PEER_DEVICE_TAGS", ""),
+        help="Comma-separated peer tags for device discovery.",
+    )
+    node.add_argument(
+        "--peer-capabilities",
+        default=os.getenv("WORKFLOW_PEER_CAPABILITIES", ""),
+        help="Comma-separated extra peer capabilities exposed in node snapshot.",
+    )
+    node.add_argument(
+        "--disable-discovery",
+        action="store_true",
+        default=_env_flag("WORKFLOW_DISABLE_DISCOVERY", default=False),
+        help="Disable LAN UDP auto-discovery broadcast.",
+    )
+    node.add_argument(
+        "--discovery-port",
+        type=int,
+        default=int(os.getenv("WORKFLOW_DISCOVERY_PORT", str(DISCOVERY_PORT_DEFAULT))),
+        help="UDP port for LAN discovery broadcast/listen.",
+    )
+    node.add_argument(
+        "--discovery-interval-sec",
+        type=float,
+        default=float(os.getenv("WORKFLOW_DISCOVERY_INTERVAL_SEC", "2.0")),
+        help="Seconds between node discovery heartbeats.",
+    )
+    node.add_argument(
+        "--discovery-broadcast",
+        default=os.getenv("WORKFLOW_DISCOVERY_BROADCAST", DISCOVERY_BROADCAST_DEFAULT),
+        help="Discovery broadcast address (default 255.255.255.255).",
+    )
+    node.add_argument(
+        "--advertise-nats-url",
+        default=os.getenv("WORKFLOW_ADVERTISE_NATS_URL", ""),
+        help="Optional advertised NATS URL for discovery payload.",
+    )
     node.add_argument(
         "--skills-config",
         default=os.getenv("WORKFLOW_SKILLS_CONFIG"),
@@ -375,6 +683,27 @@ def build_parser() -> argparse.ArgumentParser:
     latex.add_argument("--compile-timeout-sec", type=int, default=360)
     latex.add_argument("--timeout-ms", type=int, default=600000)
     latex.add_argument("--wait-timeout-sec", type=float, default=900.0)
+
+    pi = sub.add_parser("submit-pi", help="Submit task to a pi-backed device client")
+    pi.add_argument("--client-id", default="cli-client")
+    pi.add_argument("--node-id", default="node-a")
+    pi.add_argument(
+        "--device-id",
+        default=None,
+        help="Optional peer device id. When set, submit-pi discovers the matching pi-agent node before submitting.",
+    )
+    pi.add_argument("--nats-url", default="nats://127.0.0.1:4222")
+    pi.add_argument("--prompt", required=True)
+    pi.add_argument("--model", default=None)
+    pi.add_argument("--skills", default="", help="Comma-separated skill ids to apply for this task.")
+    pi.add_argument("--session-label", default=None)
+    pi.add_argument("--file-root", default=None, help="Optional remote file root hint for multi-device file workflows.")
+    pi.add_argument("--allow-session", action="store_true", help="Allow pi session persistence instead of forcing --no-session.")
+    pi.add_argument("--max-steps", type=int, default=24)
+    pi.add_argument("--timeout-ms", type=int, default=120000)
+    pi.add_argument("--wait-timeout-sec", type=float, default=120.0)
+    pi.add_argument("--discovery-timeout-sec", type=float, default=1.0)
+    pi.add_argument("--stream-events", action="store_true", help="Emit task events as newline-delimited JSON while waiting.")
 
     upload = sub.add_parser("upload-file", help="Upload a file to node")
     upload.add_argument("--client-id", default="cli-client")
@@ -431,6 +760,44 @@ def build_parser() -> argparse.ArgumentParser:
     snap.add_argument("--nats-url", default="nats://127.0.0.1:4222")
     snap.add_argument("--timeout-sec", type=float, default=3.0)
 
+    discover = sub.add_parser("discover-nodes", help="Discover online AgSwarm peer nodes from NATS status")
+    discover.add_argument("--client-id", default="cli-client")
+    discover.add_argument("--nats-url", default="nats://127.0.0.1:4222")
+    discover.add_argument("--timeout-sec", type=float, default=1.5)
+    discover.add_argument(
+        "--require-capabilities",
+        default="",
+        help="Comma-separated peer capabilities required in node status.",
+    )
+
+    peer_ping = sub.add_parser("peer-ping", help="Ping an AgSwarm peer node")
+    peer_ping.add_argument("--client-id", default="cli-client")
+    peer_ping.add_argument("--node-id", default="node-a")
+    peer_ping.add_argument("--device-id", default=None)
+    peer_ping.add_argument("--nats-url", default="nats://127.0.0.1:4222")
+    peer_ping.add_argument("--timeout-sec", type=float, default=3.0)
+    peer_ping.add_argument("--discovery-timeout-sec", type=float, default=1.0)
+    peer_ping.add_argument(
+        "--require-capabilities",
+        default="task-dispatch",
+        help="Comma-separated capabilities required when resolving by --device-id.",
+    )
+
+    peer_command = sub.add_parser("peer-command", help="Send a lightweight command to an AgSwarm peer")
+    peer_command.add_argument("--client-id", default="cli-client")
+    peer_command.add_argument("--node-id", default="node-a")
+    peer_command.add_argument("--device-id", default=None)
+    peer_command.add_argument("--nats-url", default="nats://127.0.0.1:4222")
+    peer_command.add_argument("--timeout-sec", type=float, default=30.0)
+    peer_command.add_argument("--discovery-timeout-sec", type=float, default=1.0)
+    peer_command.add_argument(
+        "--require-capabilities",
+        default="task-dispatch",
+        help="Comma-separated capabilities required when resolving by --device-id.",
+    )
+    peer_command.add_argument("peer_command")
+    peer_command.add_argument("--payload", default=None, help="JSON object payload for the peer command.")
+
     agent_check = sub.add_parser("agent-check", help="Check if node agent is ready and can accept tasks")
     agent_check.add_argument("--client-id", default="cli-client")
     agent_check.add_argument("--node-id", default="node-a")
@@ -455,6 +822,9 @@ async def dispatch(args: argparse.Namespace) -> None:
     if args.command == "submit-latex":
         await cmd_submit_latex(args)
         return
+    if args.command == "submit-pi":
+        await cmd_submit_pi(args)
+        return
     if args.command == "upload-file":
         await cmd_upload_file(args)
         return
@@ -469,6 +839,15 @@ async def dispatch(args: argparse.Namespace) -> None:
         return
     if args.command == "node-snapshot":
         await cmd_node_snapshot(args)
+        return
+    if args.command == "discover-nodes":
+        await cmd_discover_nodes(args)
+        return
+    if args.command == "peer-ping":
+        await cmd_peer_ping(args)
+        return
+    if args.command == "peer-command":
+        await cmd_peer_command(args)
         return
     if args.command == "agent-check":
         await cmd_agent_check(args)

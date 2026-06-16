@@ -67,6 +67,11 @@ def extract_error_message(result: dict[str, Any]) -> str:
     if isinstance(terminal, dict):
         payload = terminal.get("payload")
         if isinstance(payload, dict):
+            stderr = payload.get("stderr")
+            if isinstance(stderr, str):
+                first_line = next((line.strip() for line in stderr.splitlines() if line.strip()), "")
+                if first_line:
+                    return first_line
             text = payload.get("message")
             if isinstance(text, str) and text.strip():
                 return text.strip()

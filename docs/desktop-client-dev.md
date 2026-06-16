@@ -25,10 +25,67 @@ python -m workflow_desktop --nats-url nats://127.0.0.1:4222 --nodes node-a,node-
 # python -m workflow_desktop --nats-url nats://127.0.0.1:4222 --nodes node-a,node-win --log-level DEBUG --log-file tmp/test-logs/desktop.app.log
 ```
 
+本机双客户端会话联调：
+
+```bash
+# automated smoke (starts/stops local nats-server by default)
+export PYTHONPATH=src
+python scripts/smoke_two_desktop_clients.py \
+  --report-path tmp/test-reports/two_desktop_smoke_latest.json
+
+# visible launcher (starts nats-server + two desktop windows)
+export PYTHONPATH=src
+python scripts/launch_two_desktop_clients.py \
+  --state-dir tmp/desktop-clients
+```
+
+`smoke_two_desktop_clients.py` 会验证完整的本机多客户端闭环：A/B 互发消息，A 向 B 派发任务，B 在 `Local Script Runner` 执行脚本。执行前脚本还会启动第三个后台客户端向 B 插入另一个任务请求，确认 B 当前脚本区绑定的仍是 A 的任务；报告中的 `background_request_did_not_steal_active_binding: true` 表示这个多设备干扰场景通过。脚本会在 B 执行完成但尚未回传结果时先重启 B，确认待回传结果能从 conversation state 恢复，然后再回传给 A；A 侧任务进入 `completed`，B 侧入站任务进入 `returned`。脚本最后会用同一组 conversation state 文件重新创建两个窗口，确认消息数与任务状态可以从磁盘恢复；报告中的 `midflow_restart_result_restored: true` 和 `restart_after_return_state_restored: true` 表示两段重启恢复验证通过。
+
+`launch_two_desktop_clients.py` 会为两个可见窗口使用独立的状态目录：
+
+```text
+tmp/desktop-clients/desktop-a/{settings.json,conversations.json,mcp-services.json}
+tmp/desktop-clients/desktop-b/{settings.json,conversations.json,mcp-services.json}
+```
+
+这样可以在一台机器上模拟两个设备客户端，同时避免 settings、MCP 配置和 conversation state 相互覆盖。
+
+如果想从干净状态重新联调，可以加 `--reset-state`：
+
+```bash
+python scripts/launch_two_desktop_clients.py \
+  --state-dir tmp/desktop-clients \
+  --reset-state
+```
+
+`--reset-state` 只会删除每个客户端目录下的 `settings.json`、`conversations.json` 和 `mcp-services.json`，不会删除日志文件。
+
+手动打开两个客户端窗口：
+
+```bash
+# terminal 1
+nats-server -c configs/nats-dev.conf
+
+# terminal 2
+export PYTHONPATH=src
+python -m workflow_desktop --client-id desktop-a --nats-url nats://127.0.0.1:4222 --nodes node-pi --log-file tmp/test-logs/desktop-a.app.log
+
+# terminal 3
+export PYTHONPATH=src
+python -m workflow_desktop --client-id desktop-b --nats-url nats://127.0.0.1:4222 --nodes node-pi --log-file tmp/test-logs/desktop-b.app.log
+```
+
+在 `Conversations` 页里，两个客户端可以通过 `client-id` 互相添加为 peer，发送普通消息、发送任务请求；收到任务请求的一端可以在 `Local Script Runner` 写 Python 脚本执行，并把结果回传给请求方。任务请求和本地脚本执行也会进入 `Task Center / History`，方便和 node 任务放在同一个上下文里追踪。
+
+对话状态会持久化到 `--conversation-state-path` 指定的 JSON 文件中。当前保存内容包括 peer、消息、未读游标、任务请求映射、任务记录、当前选中 peer 和最新任务请求。重新打开客户端后，`Conversations` 页会恢复消息与任务状态；peer 列表和对话摘要会显示 `Unread`、`Open inbound` 和 `Open outbound`，用于区分未读消息与未完成任务。
+
+脚本执行结果会绑定到具体的 `request_message_id`。当前脚本区选中的请求会和“最近收到的请求”分开维护，因此其他 peer 的后台任务不会抢走正在编辑/执行的请求绑定；切换到其他 peer 或加载其他请求时，如果结果不属于当前请求，结果区会清空，避免把旧请求的 stdout 误回传给新请求。
+
 ## 2. 当前 MVP 功能
 
 页面：
 
+1. `Conversations`：客户端 peer 发现、点对点消息、任务请求、本地脚本执行和结果回传；支持未读计数、open task 摘要、请求状态行、脚本结果 request 绑定和重启恢复。
 1. `Task Center`：节点列表、拖拽输入、上传、Echo/LaTeX 任务发起。
 2. `Task Detail`：选中任务的时间线 + 完整结果 JSON。
    - 含状态徽标、错误码徽标和用户消息摘要（便于失败定位）。

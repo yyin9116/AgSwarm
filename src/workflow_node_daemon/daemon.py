@@ -11,6 +11,7 @@ from workflow_node_daemon.models import (
     TaskStatus,
     utc_now_iso,
 )
+from workflow_node_daemon.peer import PeerNodeConfig
 from workflow_runtime.protocol import Event, TaskEnvelope
 from workflow_runtime.runtime import InMemoryEventSink, Runtime
 
@@ -24,6 +25,7 @@ class WorkflowNodeDaemon:
         *,
         max_concurrency: int = 1,
         default_retries: int = 0,
+        peer_config: PeerNodeConfig | None = None,
     ) -> None:
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be >= 1")
@@ -33,6 +35,7 @@ class WorkflowNodeDaemon:
         self.runtime = runtime
         self.max_concurrency = max_concurrency
         self.default_retries = default_retries
+        self.peer_config = peer_config or PeerNodeConfig()
         self.records: dict[str, TaskRecord] = {}
         self._queue: asyncio.Queue[str | None] = asyncio.Queue()
         self._workers: list[asyncio.Task[None]] = []
@@ -123,6 +126,8 @@ class WorkflowNodeDaemon:
         if not isinstance(skills_source, str):
             skills_source = None
         skill_ids = [str(x) for x in skill_info.get("skill_ids", [])] if isinstance(skill_info.get("skill_ids"), list) else []
+        capability_summary = self.runtime.capability_summary()
+        mcp_services = self.runtime.mcp_services()
         return NodeSnapshot(
             status=self._node_status(),
             max_concurrency=self.max_concurrency,
@@ -136,6 +141,10 @@ class WorkflowNodeDaemon:
             skills_source_path=skills_source,
             skills_count=int(skill_info.get("skill_count", 0) or 0),
             skill_ids=skill_ids,
+            capability_summary=capability_summary,
+            mcp_services=mcp_services,
+            peer_node=self.peer_config.describe(adapters=adapters),
+            recent_tasks=self._recent_task_summaries(),
         )
 
     def get_task_events(self, task_id: str) -> list[dict]:
@@ -378,6 +387,41 @@ class WorkflowNodeDaemon:
             last_error_message=last_error_message,
             user_message=user_message,
         )
+
+    def _recent_task_summaries(self, *, limit: int = 8, max_text: int = 240) -> list[dict[str, object]]:
+        records = sorted(
+            self.records.values(),
+            key=lambda item: item.finished_at or item.started_at or item.created_at,
+            reverse=True,
+        )
+        summaries: list[dict[str, object]] = []
+        for record in records[:limit]:
+            snapshot = self._snapshot(record)
+            text = record.envelope.input_text or ""
+            if len(text) > max_text:
+                text = text[: max_text - 3] + "..."
+            completed = next(
+                (event.payload for event in reversed(record.events) if event.type == "adapter.completed"),
+                {},
+            )
+            output = completed.get("output") if isinstance(completed, dict) else None
+            if isinstance(output, str) and len(output) > max_text:
+                output = output[: max_text - 3] + "..."
+            summaries.append(
+                {
+                    "task_id": record.task_id,
+                    "adapter": record.envelope.adapter.name,
+                    "status": snapshot.status,
+                    "created_at": snapshot.created_at,
+                    "started_at": snapshot.started_at,
+                    "finished_at": snapshot.finished_at,
+                    "input_text": text,
+                    "user_message": snapshot.user_message,
+                    "last_event_type": snapshot.last_event_type,
+                    "result": output,
+                }
+            )
+        return summaries
 
     def _latest_adapter_error(self, events: list[Event]) -> tuple[str | None, str | None]:
         for event in reversed(events):

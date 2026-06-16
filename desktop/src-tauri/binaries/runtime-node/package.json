@@ -1,0 +1,10 @@
+{
+  "name": "agswarm-pi-web-runtime",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@jmfederico/pi-web": "1.202606.3",
+    "@earendil-works/pi-coding-agent": "^0.79.1",
+    "@earendil-works/pi-ai": "^0.79.1"
+  }
+}

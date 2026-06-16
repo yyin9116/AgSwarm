@@ -1,0 +1,5 @@
+{
+  "name": "AgSwarm Client",
+  "description": "A minimalist frontend for the AgSwarm local network application, inspired by LANDrop and LocalSend.",
+  "requestFramePermissions": []
+}
