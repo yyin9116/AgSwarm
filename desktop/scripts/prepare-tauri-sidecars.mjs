@@ -151,7 +151,6 @@ async function preparePiWebRuntime(target) {
     ? ['ci', '--include=optional']
     : ['install', '--include=optional'];
   run('npm', npmArgs, { cwd: runtimeDir });
-  await pruneRuntimeDevelopmentFiles(runtimeDir);
 
   await access(path.join(piWebPackageDir, 'dist', 'server', 'index.js'));
   await access(path.join(piWebPackageDir, 'dist', 'server', 'sessiond.js'));
@@ -163,6 +162,7 @@ async function preparePiWebRuntime(target) {
 
   rmSync(bundledPiWebPackageDir, { recursive: true, force: true });
   await copyPackageForDiagnostics(piWebPackageDir, bundledPiWebPackageDir);
+  await pruneRuntimeDevelopmentFiles(runtimeDir);
 
   await writePreparedTargetMarker(target);
   console.log(`pi-web runtime ready for ${target}: ${runtimeDir}`);

@@ -33,14 +33,14 @@ jobs:
       - name: Checkout AgSwarm
         uses: actions/checkout@v4
         with:
-          path: AgSwarm
+          path: s
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: AgSwarm/desktop/package-lock.json
+          cache-dependency-path: s/desktop/package-lock.json
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -60,32 +60,32 @@ jobs:
             pkg-config
 
       - name: Install desktop dependencies
-        working-directory: AgSwarm/desktop
+        working-directory: s/desktop
         run: npm ci
 
       - name: Typecheck desktop
-        working-directory: AgSwarm/desktop
+        working-directory: s/desktop
         run: npm run lint
 
       - name: Build desktop frontend
-        working-directory: AgSwarm/desktop
+        working-directory: s/desktop
         run: npm run build
 
       - name: Prepare Linux sidecars for Rust check
-        working-directory: AgSwarm/desktop
+        working-directory: s/desktop
         env:
           TAURI_SIDECAR_TARGET: x86_64-unknown-linux-gnu
           NODE_VERSION: ${{ env.NODE_VERSION }}
         run: npm run prepare:sidecars -- --target x86_64-unknown-linux-gnu --force
 
       - name: Check Linux sidecars for Rust check
-        working-directory: AgSwarm/desktop
+        working-directory: s/desktop
         env:
           TAURI_SIDECAR_TARGET: x86_64-unknown-linux-gnu
         run: npm run check:sidecars -- --target x86_64-unknown-linux-gnu
 
       - name: Check Rust desktop crate
-        working-directory: AgSwarm/desktop/src-tauri
+        working-directory: s/desktop/src-tauri
         env:
           TAURI_SIDECAR_TARGET: x86_64-unknown-linux-gnu
         run: cargo check
@@ -103,25 +103,35 @@ jobs:
             sidecar_target: aarch64-apple-darwin
             tauri_args: --target aarch64-apple-darwin
             artifact_name: macOS-Apple-Silicon
+            project_path: s/desktop
+            artifact_path: s/dist-artifacts/*
           - label: Windows x64
             os: windows-2022
             sidecar_target: x86_64-pc-windows-msvc
             tauri_args: ""
             artifact_name: Windows-x64
+            project_path: W:/desktop
+            artifact_path: W:/dist-artifacts/*
 
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout AgSwarm
         uses: actions/checkout@v4
         with:
-          path: AgSwarm
+          path: s
+
+      - name: Map short Windows build path
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          subst W: "${{ github.workspace }}\s"
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: AgSwarm/desktop/package-lock.json
+          cache-dependency-path: s/desktop/package-lock.json
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -146,18 +156,18 @@ jobs:
         run: rustup target add ${{ matrix.sidecar_target }}
 
       - name: Install desktop dependencies
-        working-directory: AgSwarm/desktop
+        working-directory: ${{ matrix.project_path }}
         run: npm ci
 
       - name: Prepare Tauri sidecars
-        working-directory: AgSwarm/desktop
+        working-directory: ${{ matrix.project_path }}
         env:
           TAURI_SIDECAR_TARGET: ${{ matrix.sidecar_target }}
           NODE_VERSION: ${{ env.NODE_VERSION }}
         run: npm run prepare:sidecars -- --target ${{ matrix.sidecar_target }} --force
 
       - name: Check prepared sidecars
-        working-directory: AgSwarm/desktop
+        working-directory: ${{ matrix.project_path }}
         env:
           TAURI_SIDECAR_TARGET: ${{ matrix.sidecar_target }}
         run: npm run check:sidecars -- --target ${{ matrix.sidecar_target }}
@@ -181,11 +191,11 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           APPLE_SIGNING_IDENTITY: "-"
         with:
-          projectPath: AgSwarm/desktop
+          projectPath: ${{ matrix.project_path }}
           args: ${{ matrix.tauri_args }}
 
       - name: Collect bundle artifacts
-        working-directory: AgSwarm/desktop
+        working-directory: ${{ matrix.project_path }}
         env:
           TAURI_SIDECAR_TARGET: ${{ matrix.sidecar_target }}
         run: npm run collect:artifacts -- --target ${{ matrix.sidecar_target }} --label ${{ matrix.artifact_name }}
@@ -194,7 +204,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: AgSwarm/dist-artifacts/*
+          path: ${{ matrix.artifact_path }}
           if-no-files-found: error
 
   release:
