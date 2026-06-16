@@ -273,6 +273,9 @@ jobs:
             --notes-path "docs/releases/${GITHUB_REF_NAME}.md" \
             --out release-assets/latest.json
 
+      - name: Verify updater release assets
+        run: node desktop/scripts/verify-release-assets.mjs --assets-dir release-assets
+
       - name: Publish GitHub Release with custom notes
         if: steps.notes.outputs.use_custom == 'true'
         uses: softprops/action-gh-release@v2
@@ -280,6 +283,7 @@ jobs:
           body_path: docs/releases/${{ github.ref_name }}.md
           files: |
             release-assets/**/*.zip
+            release-assets/**/*.tar.gz
             release-assets/**/*.dmg
             release-assets/**/*.sig
             release-assets/**/*.exe
@@ -297,6 +301,7 @@ jobs:
           generate_release_notes: true
           files: |
             release-assets/**/*.zip
+            release-assets/**/*.tar.gz
             release-assets/**/*.dmg
             release-assets/**/*.sig
             release-assets/**/*.exe
