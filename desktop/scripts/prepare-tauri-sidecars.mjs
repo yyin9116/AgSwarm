@@ -52,6 +52,7 @@ const args = parseArgs(process.argv.slice(2));
 const target = args.target || process.env.TAURI_SIDECAR_TARGET || currentTarget();
 const config = TARGETS[target];
 const DEFAULT_NODE_VERSION = '22.19.0';
+const DOWNLOAD_TIMEOUT_MS = 120_000;
 
 if (!config) {
   throw new Error(`Unsupported sidecar target: ${target}`);
@@ -103,7 +104,7 @@ function currentTarget() {
 
 async function prepareNodeSidecar(target, targetConfig, version) {
   const destination = path.join(binariesDir, targetConfig.nodeName);
-  if (existsSync(destination) && args.force !== 'true') {
+  if (existsSync(destination) && args.forceNode !== 'true') {
     console.log(`Node sidecar already exists for ${target}: ${destination}`);
     return;
   }
@@ -114,6 +115,7 @@ async function prepareNodeSidecar(target, targetConfig, version) {
   const extractDir = path.join(workDir, `${target}-node`);
   rmSync(extractDir, { recursive: true, force: true });
   mkdirSync(extractDir, { recursive: true });
+  if (args.forceNode === 'true') rmSync(archivePath, { force: true });
 
   console.log(`Downloading ${archiveUrl}`);
   await download(archiveUrl, archivePath);
@@ -220,6 +222,9 @@ function download(url, destination) {
       response.pipe(output);
       output.on('finish', () => output.close(resolve));
       output.on('error', reject);
+    });
+    request.setTimeout(DOWNLOAD_TIMEOUT_MS, () => {
+      request.destroy(new Error(`Download timed out after ${DOWNLOAD_TIMEOUT_MS / 1000}s: ${url}`));
     });
     request.on('error', reject);
   });

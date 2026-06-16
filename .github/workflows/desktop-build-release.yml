@@ -24,7 +24,6 @@ permissions:
 env:
   NODE_VERSION: "22.19.0"
   BUN_VERSION: "1.3.4"
-  PI_REPOSITORY: earendil-works/pi
 
 jobs:
   ci:
@@ -36,20 +35,12 @@ jobs:
         with:
           path: AgSwarm
 
-      - name: Checkout pi SDK
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.PI_REPOSITORY }}
-          path: pi
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: |
-            AgSwarm/desktop/package-lock.json
-            pi/package-lock.json
+          cache-dependency-path: AgSwarm/desktop/package-lock.json
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -67,14 +58,6 @@ jobs:
             libssl-dev \
             libwebkit2gtk-4.1-dev \
             pkg-config
-
-      - name: Install pi SDK dependencies
-        working-directory: pi
-        run: npm ci
-
-      - name: Build pi SDK packages
-        working-directory: pi
-        run: npm run build
 
       - name: Install desktop dependencies
         working-directory: AgSwarm/desktop
@@ -133,20 +116,12 @@ jobs:
         with:
           path: AgSwarm
 
-      - name: Checkout pi SDK
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.PI_REPOSITORY }}
-          path: pi
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
-          cache-dependency-path: |
-            AgSwarm/desktop/package-lock.json
-            pi/package-lock.json
+          cache-dependency-path: AgSwarm/desktop/package-lock.json
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -169,14 +144,6 @@ jobs:
       - name: Install Rust target for macOS cross-arch
         if: runner.os == 'macOS'
         run: rustup target add ${{ matrix.sidecar_target }}
-
-      - name: Install pi SDK dependencies
-        working-directory: pi
-        run: npm ci
-
-      - name: Build pi SDK packages
-        working-directory: pi
-        run: npm run build
 
       - name: Install desktop dependencies
         working-directory: AgSwarm/desktop

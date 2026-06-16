@@ -1,7 +1,7 @@
 {
   "name": "agswarm-client",
   "private": true,
-  "version": "0.2.17",
+  "version": "0.2.18",
   "type": "module",
   "scripts": {
     "dev": "vite --port=3000 --host=127.0.0.1",
@@ -21,10 +21,10 @@
   },
   "dependencies": {
     "@copilotkit/react-core": "^1.59.5",
-    "@earendil-works/pi-agent-core": "file:../../pi/packages/agent",
-    "@earendil-works/pi-ai": "file:../../pi/packages/ai",
-    "@earendil-works/pi-coding-agent": "file:../../pi/packages/coding-agent",
-    "@earendil-works/pi-tui": "file:../../pi/packages/tui",
+    "@earendil-works/pi-agent-core": "0.79.3",
+    "@earendil-works/pi-ai": "0.79.3",
+    "@earendil-works/pi-coding-agent": "0.79.3",
+    "@earendil-works/pi-tui": "0.79.3",
     "@jmfederico/pi-web": "^1.202606.3",
     "@mantine/core": "^9.3.1",
     "@mantine/hooks": "^9.3.1",
