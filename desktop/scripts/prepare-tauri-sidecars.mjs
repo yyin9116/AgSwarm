@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createWriteStream, existsSync, mkdirSync, rmSync, chmodSync } from 'node:fs';
-import { access, cp } from 'node:fs/promises';
+import { access, cp, readFile, writeFile } from 'node:fs/promises';
 import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
@@ -12,6 +12,10 @@ const desktopDir = path.resolve(scriptDir, '..');
 const binariesDir = path.join(desktopDir, 'src-tauri', 'binaries');
 const bridgeEntry = path.join(desktopDir, 'scripts', 'pi-agent-session-bridge.mjs');
 const workDir = path.join(desktopDir, 'src-tauri', 'target', 'sidecar-work');
+const runtimeDir = path.join(binariesDir, 'runtime-node');
+const piWebPackageDir = path.join(runtimeDir, 'node_modules', '@jmfederico', 'pi-web');
+const piWebClientDir = path.join(binariesDir, 'pi-web-client');
+const bundledPiWebPackageDir = path.join(binariesDir, 'pi-web-package');
 
 const TARGETS = {
   'aarch64-apple-darwin': {
@@ -59,6 +63,7 @@ mkdirSync(workDir, { recursive: true });
 const nodeVersion = (args.nodeVersion || process.env.NODE_VERSION || DEFAULT_NODE_VERSION).replace(/^v/, '');
 const skipNode = args.skipNode === 'true';
 const skipBridge = args.skipBridge === 'true';
+const skipRuntime = args.skipRuntime === 'true';
 
 if (!skipNode) {
   await prepareNodeSidecar(target, config, nodeVersion);
@@ -66,6 +71,10 @@ if (!skipNode) {
 
 if (!skipBridge) {
   prepareBridgeSidecar(target, config);
+}
+
+if (!skipRuntime) {
+  await preparePiWebRuntime(target);
 }
 
 console.log(`Prepared Tauri sidecars for ${target}.`);
@@ -130,6 +139,68 @@ function prepareBridgeSidecar(target, targetConfig) {
   run('bun', bunArgs, { cwd: desktopDir });
   if (!destination.endsWith('.exe')) chmodSync(destination, 0o755);
   console.log(`Bridge sidecar ready for ${target}: ${destination}`);
+}
+
+async function preparePiWebRuntime(target) {
+  const packageJson = path.join(runtimeDir, 'package.json');
+  await access(packageJson);
+
+  const npmArgs = existsSync(path.join(runtimeDir, 'package-lock.json'))
+    ? ['ci', '--include=optional']
+    : ['install', '--include=optional'];
+  run('npm', npmArgs, { cwd: runtimeDir });
+
+  await access(path.join(piWebPackageDir, 'dist', 'server', 'index.js'));
+  await access(path.join(piWebPackageDir, 'dist', 'server', 'sessiond.js'));
+  await access(path.join(piWebPackageDir, 'dist', 'server', 'app.js'));
+
+  if (!existsSync(path.join(piWebClientDir, 'index.html'))) {
+    await cp(path.join(piWebPackageDir, 'dist', 'client'), piWebClientDir, { recursive: true });
+  }
+
+  rmSync(bundledPiWebPackageDir, { recursive: true, force: true });
+  await copyPackageForDiagnostics(piWebPackageDir, bundledPiWebPackageDir);
+
+  await writePreparedTargetMarker(target);
+  console.log(`pi-web runtime ready for ${target}: ${runtimeDir}`);
+}
+
+async function copyPackageForDiagnostics(source, destination) {
+  mkdirSync(destination, { recursive: true });
+  for (const entry of [
+    'package.json',
+    'README.md',
+    'LICENSE',
+    'install.sh',
+    'plugin-api.d.ts',
+    'plugin-api',
+    'extensions',
+    'docs',
+    'dist',
+  ]) {
+    const sourcePath = path.join(source, entry);
+    if (!existsSync(sourcePath)) continue;
+    await cp(sourcePath, path.join(destination, entry), { recursive: true, force: true });
+  }
+}
+
+async function writePreparedTargetMarker(target) {
+  const markerPath = path.join(runtimeDir, '.agswarm-runtime-target');
+  const packageData = JSON.parse(await readFile(path.join(piWebPackageDir, 'package.json'), 'utf8'));
+  await writeFile(
+    markerPath,
+    JSON.stringify(
+      {
+        target,
+        platform: os.platform(),
+        arch: os.arch(),
+        piWebVersion: packageData.version,
+        preparedAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    ) + '\n',
+  );
 }
 
 function download(url, destination) {

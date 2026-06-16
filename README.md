@@ -19,7 +19,7 @@ The desktop app brings chat, command execution, device discovery, task handoff, 
 
 The latest packaged desktop build is published on GitHub Releases:
 
-[Download AgSwarm v0.2.16](https://github.com/yyin9116/AgSwarm/releases/tag/v0.2.16)
+[Download AgSwarm v0.2.17](https://github.com/yyin9116/AgSwarm/releases/tag/v0.2.17)
 
 Current release artifacts:
 
@@ -81,11 +81,11 @@ Desktop release packaging is defined in [.github/workflows/desktop-build-release
 - Pull requests and pushes that touch desktop release inputs run desktop CI.
 - Version tags matching `v*` build release artifacts.
 - The current release matrix builds macOS Apple Silicon and Windows x64.
-- Release notes come from `docs/releases/<tag>.md` when present, for example [docs/releases/v0.2.16.md](docs/releases/v0.2.16.md).
+- Release notes come from `docs/releases/<tag>.md` when present, for example [docs/releases/v0.2.17.md](docs/releases/v0.2.17.md).
 - Release assets include generated checksums in `SHA256SUMS.txt`.
 - Signed auto-update assets are generated when `TAURI_SIGNING_PRIVATE_KEY` is configured in GitHub Secrets. Release builds fail fast if the updater signing key is missing.
 
-The workflow prepares Node and pi AgentSession bridge sidecars before packaging. Missing sidecars are treated as build failures instead of falling back to a provider bypass or a Python bridge.
+The workflow prepares Node, pi AgentSession bridge, and bundled pi-web runtime resources before packaging. Missing sidecars or pi-web runtime files are treated as build failures instead of falling back to a provider bypass, Python bridge, or host-installed package.
 
 ### Auto-Update
 
@@ -108,4 +108,4 @@ Updater release requirements:
 
 ## Status
 
-AgSwarm is under active development. The current public desktop release is `v0.2.16`; platform claims, screenshots, and release notes should be kept aligned with actual GitHub Release artifacts.
+AgSwarm is under active development. The current public desktop release is `v0.2.17`; platform claims, screenshots, and release notes should be kept aligned with actual GitHub Release artifacts.

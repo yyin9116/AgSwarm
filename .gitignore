@@ -11,6 +11,11 @@ dist-artifacts/
 *.spec
 .DS_Store
 
+# Tauri sidecars and runtime resources are prepared per packaging target.
+desktop/src-tauri/binaries/node-*
+desktop/src-tauri/binaries/pi-agent-session-bridge-*
+desktop/src-tauri/binaries/runtime-node/.agswarm-runtime-target
+
 # Local tooling/runtime downloads and worktree internals.
 tools/nats-server/
 workflow/

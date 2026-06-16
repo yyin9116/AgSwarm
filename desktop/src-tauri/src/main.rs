@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
@@ -1172,14 +1174,15 @@ impl ManagedPeer {
             .map_err(|err| format!("failed to create NATS stdout log: {err}"))?;
         let stderr = std::fs::File::create(log_dir.join("nats.err.log"))
             .map_err(|err| format!("failed to create NATS stderr log: {err}"))?;
-        let child = Command::new(&nats_server)
+        let mut command = Command::new(&nats_server);
+        command
             .arg("-c")
             .arg(repo_root.join("configs").join("nats-dev.conf"))
             .current_dir(repo_root)
-            .env("PATH", child_path_env())
             .stdout(Stdio::from(stdout))
-            .stderr(Stdio::from(stderr))
-            .spawn()
+            .stderr(Stdio::from(stderr));
+        let child = command
+            .spawn_with_path()
             .map_err(|err| format!("failed to start {nats_server}: {err}"))?;
         self.nats = Some(child);
         self.last_nats_exit_code = None;
