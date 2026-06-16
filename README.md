@@ -19,7 +19,7 @@ The desktop app brings chat, command execution, device discovery, task handoff, 
 
 The latest packaged desktop build is published on GitHub Releases:
 
-[Download AgSwarm v0.2.11](https://github.com/yyin9116/AgSwarm/releases/tag/v0.2.11)
+[Download AgSwarm v0.2.12](https://github.com/yyin9116/AgSwarm/releases/tag/v0.2.12)
 
 Current release artifacts:
 
@@ -81,7 +81,7 @@ Desktop release packaging is defined in [.github/workflows/desktop-build-release
 - Pull requests and pushes that touch desktop release inputs run desktop CI.
 - Version tags matching `v*` build release artifacts.
 - The current release matrix builds macOS Apple Silicon and Windows x64.
-- Release notes come from `docs/releases/<tag>.md` when present, for example [docs/releases/v0.2.11.md](docs/releases/v0.2.11.md).
+- Release notes come from `docs/releases/<tag>.md` when present, for example [docs/releases/v0.2.12.md](docs/releases/v0.2.12.md).
 - Release assets include generated checksums in `SHA256SUMS.txt`.
 
 The workflow prepares Node and pi AgentSession bridge sidecars before packaging. Missing sidecars are treated as build failures instead of falling back to a provider bypass or a Python bridge.
@@ -96,4 +96,4 @@ The workflow prepares Node and pi AgentSession bridge sidecars before packaging.
 
 ## Status
 
-AgSwarm is under active development. The current public desktop release is `v0.2.11`; platform claims, screenshots, and release notes should be kept aligned with actual GitHub Release artifacts.
+AgSwarm is under active development. The current public desktop release is `v0.2.12`; platform claims, screenshots, and release notes should be kept aligned with actual GitHub Release artifacts.
