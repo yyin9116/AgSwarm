@@ -195,11 +195,23 @@ jobs:
           TAURI_SIDECAR_TARGET: ${{ matrix.sidecar_target }}
         run: npm run check:sidecars -- --target ${{ matrix.sidecar_target }}
 
+      - name: Check updater signing secret
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [[ -z "${TAURI_SIGNING_PRIVATE_KEY}" ]]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY is required for signed updater artifacts." >&2
+            exit 1
+          fi
+
       - name: Build Tauri bundle
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIDECAR_TARGET: ${{ matrix.sidecar_target }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           APPLE_SIGNING_IDENTITY: "-"
         with:
           projectPath: AgSwarm/desktop
@@ -251,6 +263,16 @@ jobs:
             echo "use_custom=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Generate updater manifest
+        run: |
+          node desktop/scripts/generate-updater-manifest.mjs \
+            --assets-dir release-assets \
+            --version "${GITHUB_REF_NAME#v}" \
+            --tag "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --notes-path "docs/releases/${GITHUB_REF_NAME}.md" \
+            --out release-assets/latest.json
+
       - name: Publish GitHub Release with custom notes
         if: steps.notes.outputs.use_custom == 'true'
         uses: softprops/action-gh-release@v2
@@ -259,12 +281,14 @@ jobs:
           files: |
             release-assets/**/*.zip
             release-assets/**/*.dmg
+            release-assets/**/*.sig
             release-assets/**/*.exe
             release-assets/**/*.msi
             release-assets/**/*.AppImage
             release-assets/**/*.deb
             release-assets/**/*.rpm
             release-assets/SHA256SUMS.txt
+            release-assets/latest.json
 
       - name: Publish GitHub Release with generated notes
         if: steps.notes.outputs.use_custom != 'true'
@@ -274,9 +298,11 @@ jobs:
           files: |
             release-assets/**/*.zip
             release-assets/**/*.dmg
+            release-assets/**/*.sig
             release-assets/**/*.exe
             release-assets/**/*.msi
             release-assets/**/*.AppImage
             release-assets/**/*.deb
             release-assets/**/*.rpm
             release-assets/SHA256SUMS.txt
+            release-assets/latest.json

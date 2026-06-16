@@ -6,6 +6,7 @@ import {
   Button,
   Card,
   Group,
+  Progress,
   PasswordInput,
   Select,
   Stack,
@@ -16,8 +17,9 @@ import {
   ThemeIcon,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { Activity, Bot, BrainCircuit, CheckCircle2, Cpu, FileCode, Folder, Key, Moon, Power, Radar, RefreshCw, Save, Sun, UserRound } from 'lucide-react';
+import { Activity, Bot, BrainCircuit, CheckCircle2, Cpu, Download, ExternalLink, FileCode, Folder, Key, Moon, Power, Radar, RefreshCw, Save, Sun, UserRound } from 'lucide-react';
 import type { DeviceAliasSettings } from '../lib/settingsStore';
+import { checkForAppUpdate, installPendingAppUpdate, manualDownloadUrl, type AppUpdateInfo, type UpdateDownloadProgress } from '../lib/updatesService';
 import type { LocalPeerStatus } from '../types/agswarm';
 
 interface SettingsViewProps {
@@ -99,6 +101,11 @@ export function SettingsView({
 }: SettingsViewProps) {
   const [isSaving, setIsSaving] = useState(false);
   const [isRestartingPeer, setIsRestartingPeer] = useState(false);
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+  const [isInstallingUpdate, setIsInstallingUpdate] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
+  const [updateStatus, setUpdateStatus] = useState('Check GitHub Releases for signed app updates.');
+  const [updateProgress, setUpdateProgress] = useState<UpdateDownloadProgress | null>(null);
 
   const restartPeer = async (showNotification: boolean) => {
     setIsRestartingPeer(true);
@@ -122,6 +129,53 @@ export function SettingsView({
       notifications.show({ color: 'red', title: 'Settings not saved', message: formatError(error) });
     } finally {
       setIsSaving(false);
+    }
+  };
+
+  const handleCheckForUpdates = async () => {
+    setIsCheckingUpdate(true);
+    setUpdateProgress(null);
+    try {
+      const result = await checkForAppUpdate();
+      if (result.status === 'available') {
+        setUpdateInfo(result.update);
+        setUpdateStatus(`Version ${result.update.version} is ready to install.`);
+        notifications.show({ color: 'teal', title: 'Update available', message: `AgSwarm ${result.update.version} is ready.` });
+      } else {
+        setUpdateInfo(null);
+        setUpdateStatus(result.message);
+        notifications.show({ color: result.status === 'current' ? 'teal' : 'yellow', title: result.status === 'current' ? 'Up to date' : 'Updates unavailable', message: result.message });
+      }
+    } catch (error) {
+      const message = updateErrorMessage(error);
+      setUpdateInfo(null);
+      setUpdateStatus(message);
+      notifications.show({ color: 'red', title: 'Update check failed', message });
+    } finally {
+      setIsCheckingUpdate(false);
+    }
+  };
+
+  const handleInstallUpdate = async () => {
+    setIsInstallingUpdate(true);
+    setUpdateStatus('Downloading update...');
+    try {
+      await installPendingAppUpdate(progress => {
+        setUpdateProgress(progress);
+        if (progress.phase === 'finished') {
+          setUpdateStatus('Installing update and restarting AgSwarm...');
+        } else if (typeof progress.percent === 'number') {
+          setUpdateStatus(`Downloading update: ${progress.percent}%`);
+        } else {
+          setUpdateStatus('Downloading update...');
+        }
+      });
+    } catch (error) {
+      const message = updateErrorMessage(error);
+      setUpdateStatus(message);
+      notifications.show({ color: 'red', title: 'Update install failed', message });
+    } finally {
+      setIsInstallingUpdate(false);
     }
   };
 
@@ -195,6 +249,67 @@ export function SettingsView({
           </Group>
           <TextInput label="Device Name" description="How you appear to others on the local network" value={deviceLabel} onChange={(event) => onDeviceLabelChange(event.currentTarget.value)} />
           <TextInput label="Default Save Path" leftSection={<Folder size={16} />} value={defaultSavePath} onChange={(event) => onDefaultSavePathChange(event.currentTarget.value)} />
+        </SettingsCard>
+
+        <SettingsCard icon={<Download size={16} />} title="Software Updates" rightSection={<Badge color={updateInfo ? 'teal' : 'gray'} variant="light">{updateInfo ? 'Available' : 'Stable'}</Badge>}>
+          <Stack gap="sm">
+            <div>
+              <Text fw={600}>Automatic Updates</Text>
+              <Text c="dimmed" size="sm">
+                Signed releases are checked from GitHub. Installing an update restarts AgSwarm after the download completes.
+              </Text>
+            </div>
+            <Text c={updateInfo ? 'teal' : 'dimmed'} size="sm">{updateStatus}</Text>
+            {updateInfo ? (
+              <Box className="agswarm-update-notes">
+                <Text fw={600} size="sm">AgSwarm {updateInfo.version}</Text>
+                {updateInfo.date ? <Text c="dimmed" size="xs">{new Date(updateInfo.date).toLocaleString()}</Text> : null}
+                {updateInfo.notes ? <Text size="sm" mt={4}>{updateInfo.notes}</Text> : null}
+              </Box>
+            ) : null}
+            {updateProgress ? (
+              <Progress
+                value={updateProgress.percent ?? 0}
+                animated={isInstallingUpdate && updateProgress.phase !== 'finished'}
+                color="teal"
+                aria-label="Update download progress"
+              />
+            ) : null}
+            <Group justify="space-between" align="center">
+              <Button
+                variant="light"
+                color="teal"
+                leftSection={<RefreshCw size={16} className={isCheckingUpdate ? 'animate-spin' : ''} />}
+                onClick={handleCheckForUpdates}
+                loading={isCheckingUpdate}
+                disabled={isInstallingUpdate}
+              >
+                Check
+              </Button>
+              <Group gap="xs">
+                <Button
+                  variant="subtle"
+                  color="gray"
+                  leftSection={<ExternalLink size={16} />}
+                  component="a"
+                  href={manualDownloadUrl()}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Releases
+                </Button>
+                <Button
+                  color="teal"
+                  leftSection={<Download size={16} />}
+                  onClick={handleInstallUpdate}
+                  loading={isInstallingUpdate}
+                  disabled={!updateInfo || isCheckingUpdate}
+                >
+                  Install
+                </Button>
+              </Group>
+            </Group>
+          </Stack>
         </SettingsCard>
 
         <SettingsCard icon={<BrainCircuit size={16} />} title="AI & Agent Configuration">
@@ -277,6 +392,17 @@ function deviceAliasesFromText(value: string): Record<string, DeviceAliasSetting
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function updateErrorMessage(error: unknown): string {
+  const message = formatError(error);
+  if (/pubkey|signature|updater/i.test(message)) {
+    return 'This build is not configured for signed automatic updates. Use the Releases link or install a build with updater signing enabled.';
+  }
+  if (/network|fetch|timed out|timeout|dns|resolve/i.test(message)) {
+    return 'Could not reach the update server. Check the network connection and try again.';
+  }
+  return message;
 }
 
 function SettingsCard({

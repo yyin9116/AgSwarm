@@ -2185,6 +2185,8 @@ fn push_unique_path(paths: &mut Vec<String>, path: &str) {
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(PeerManager::default())
         .manage(PiWebManager::default())
         .invoke_handler(tauri::generate_handler![

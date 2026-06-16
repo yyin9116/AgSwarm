@@ -27,6 +27,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "externalBin": [
       "binaries/pi-agent-session-bridge",
       "binaries/node"
@@ -46,5 +47,16 @@
       "../../assets/icons/app-icon.icns",
       "../../assets/icons/app-icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVCMjY3MzAzQUI5MTQzOUUKUldTZVE1R3JBM01tV3p3bVp5aWprUXBXYk1jc1ROejBUTXMrcThCZXlpQ2g3QkNlZEhDTk4wczYK",
+      "endpoints": [
+        "https://github.com/yyin9116/AgSwarm/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

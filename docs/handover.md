@@ -97,7 +97,7 @@
 31. 新增本地 Phase-2 基线脚本：`scripts/phase2_local_baseline.py`（自动拉起 nats + node + regression 并输出报告）。
 32. Node snapshot 新增 MCP 能力摘要字段：`capability_summary` 与 `mcp_services`。
 33. Desktop `Online Nodes` 与 `Agent Check` 已展示 MCP 服务摘要。
-34. Desktop 已接入自动更新检查（启动检查 + 手动检查，支持 GitHub Release feed/asset pattern 配置）。
+34. Desktop 自动更新改为 Tauri signed updater：Settings 支持手动检查、下载、安装并重启；Release workflow 需要 `TAURI_SIGNING_PRIVATE_KEY` 生成 `.sig` 与 `latest.json`，缺失时发布失败。
 35. 应用图标链路已接入：`scripts/generate_app_icon.py` 生成 `assets/icons/app-icon.(png/ico/icns)`，运行时窗口/托盘与打包产物图标已替换。
 36. 局域网自动发现已接入（Node UDP 广播 + Desktop UDP 监听）：Desktop 可自动合并发现节点，并在当前 NATS 为 loopback 时自动切换到发现到的 LAN NATS URL（可在 Settings 关闭）。
 37. Desktop->Node 配置同步协议已接入：节点支持 `config.sync` 请求并持久化配置快照；snapshot/status 已包含 `config_sync_revision/config_sync_digest/config_synced_by/config_synced_at`。
@@ -199,6 +199,5 @@
 ## 7. 根目录结构说明
 
 根目录结构与模块职责已单独整理：`docs/project-structure.md`。
-
 
 

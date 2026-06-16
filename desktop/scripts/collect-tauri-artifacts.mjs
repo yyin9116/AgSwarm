@@ -28,13 +28,21 @@ mkdirSync(outDir, { recursive: true });
 const copied = [];
 for (const releaseDir of releaseDirs) {
   const before = copied.length;
-  await copyMatching(path.join(releaseDir, 'dmg'), ['.dmg']);
-  await copyMatching(path.join(releaseDir, 'nsis'), ['.exe']);
-  await copyMatching(path.join(releaseDir, 'msi'), ['.msi']);
-  await copyMatching(path.join(releaseDir, 'appimage'), ['.AppImage']);
-  await copyMatching(path.join(releaseDir, 'deb'), ['.deb']);
-  await copyMatching(path.join(releaseDir, 'rpm'), ['.rpm']);
-  await zipMacApps(path.join(releaseDir, 'macos'));
+  if (isMacLabel(label)) {
+    await copyMatching(path.join(releaseDir, 'dmg'), ['.dmg']);
+    await copyMatching(path.join(releaseDir, 'dmg'), ['.sig'], { signatureFor: '.dmg' });
+    await zipMacApps(path.join(releaseDir, 'macos'));
+  } else if (isWindowsLabel(label)) {
+    await copyMatching(path.join(releaseDir, 'nsis'), ['.exe']);
+    await copyMatching(path.join(releaseDir, 'nsis'), ['.sig'], { signatureFor: '.exe' });
+    await copyMatching(path.join(releaseDir, 'msi'), ['.msi']);
+    await copyMatching(path.join(releaseDir, 'msi'), ['.sig'], { signatureFor: '.msi' });
+  } else {
+    await copyMatching(path.join(releaseDir, 'appimage'), ['.AppImage']);
+    await copyMatching(path.join(releaseDir, 'appimage'), ['.sig'], { signatureFor: '.AppImage' });
+    await copyMatching(path.join(releaseDir, 'deb'), ['.deb']);
+    await copyMatching(path.join(releaseDir, 'rpm'), ['.rpm']);
+  }
   if (copied.length > before) break;
 }
 
@@ -57,14 +65,14 @@ function parseArgs(values) {
   return parsed;
 }
 
-async function copyMatching(directory, extensions) {
+async function copyMatching(directory, extensions, options = {}) {
   if (!existsSync(directory)) return;
   const entries = await import('node:fs/promises').then(fs => fs.readdir(directory));
   for (const entry of entries) {
     const source = path.join(directory, entry);
     if (!statSync(source).isFile()) continue;
     if (!extensions.some(extension => entry.endsWith(extension))) continue;
-    const destination = path.join(outDir, normalizeName(entry));
+    const destination = path.join(outDir, normalizeName(entry, options));
     await copyFile(source, destination);
     copied.push(destination);
   }
@@ -91,9 +99,13 @@ async function zipMacApps(directory) {
   }
 }
 
-function normalizeName(fileName) {
+function normalizeName(fileName, options = {}) {
   const extension = path.extname(fileName);
   const base = [releaseName, sanitizeName(label)].filter(Boolean).join('-');
+  if (extension === '.sig' && options.signatureFor) {
+    if (options.signatureFor === '.exe') return `${base}-Setup.exe.sig`;
+    return `${base}${options.signatureFor}.sig`;
+  }
   if (extension === '.zip' && fileName.endsWith('.app.zip')) return `${base}.app.zip`;
   if (extension === '.exe') return `${base}-Setup.exe`;
   if (extension) return `${base}${extension}`;
@@ -106,6 +118,14 @@ function labelForTarget(value) {
     'x86_64-pc-windows-msvc': 'Windows-x64',
   };
   return labels[value] || value;
+}
+
+function isMacLabel(value) {
+  return /macos|darwin|apple/i.test(value);
+}
+
+function isWindowsLabel(value) {
+  return /windows|win32|msvc/i.test(value);
 }
 
 function sanitizeName(value) {

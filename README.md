@@ -83,8 +83,20 @@ Desktop release packaging is defined in [.github/workflows/desktop-build-release
 - The current release matrix builds macOS Apple Silicon and Windows x64.
 - Release notes come from `docs/releases/<tag>.md` when present, for example [docs/releases/v0.2.13.md](docs/releases/v0.2.13.md).
 - Release assets include generated checksums in `SHA256SUMS.txt`.
+- Signed auto-update assets are generated when `TAURI_SIGNING_PRIVATE_KEY` is configured in GitHub Secrets. Release builds fail fast if the updater signing key is missing.
 
 The workflow prepares Node and pi AgentSession bridge sidecars before packaging. Missing sidecars are treated as build failures instead of falling back to a provider bypass or a Python bridge.
+
+### Auto-Update
+
+The desktop app uses Tauri's signed updater. Settings includes a Software Updates card that can check GitHub Releases, download an available update, install it, and relaunch AgSwarm.
+
+Updater release requirements:
+
+- `TAURI_SIGNING_PRIVATE_KEY` must be set as a GitHub Actions secret.
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` should be set when the private key is password-protected.
+- The public updater key is embedded in `desktop/src-tauri/tauri.conf.json`.
+- Tagged release builds publish `latest.json` plus `.sig` files next to the macOS Apple Silicon DMG and Windows x64 setup executable.
 
 ## Documentation
 
