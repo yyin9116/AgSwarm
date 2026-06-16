@@ -15,15 +15,19 @@ const args = parseArgs(process.argv.slice(2));
 const target = args.target || process.env.TAURI_SIDECAR_TARGET || '';
 const label = args.label || labelForTarget(target) || `${os.platform()}-${os.arch()}`;
 const releaseName = sanitizeName(args.releaseName || process.env.AG_SWARM_RELEASE_NAME || 'AgSwarm');
-const releaseDirs = [
-  path.join(desktopDir, 'src-tauri', 'target', ...(target ? [target] : []), 'release', 'bundle'),
-];
+const releaseDirs = target
+  ? [
+      path.join(desktopDir, 'src-tauri', 'target', target, 'release', 'bundle'),
+      path.join(desktopDir, 'src-tauri', 'target', 'release', 'bundle'),
+    ]
+  : [path.join(desktopDir, 'src-tauri', 'target', 'release', 'bundle')];
 
 rmSync(outDir, { recursive: true, force: true });
 mkdirSync(outDir, { recursive: true });
 
 const copied = [];
 for (const releaseDir of releaseDirs) {
+  const before = copied.length;
   await copyMatching(path.join(releaseDir, 'dmg'), ['.dmg']);
   await copyMatching(path.join(releaseDir, 'nsis'), ['.exe']);
   await copyMatching(path.join(releaseDir, 'msi'), ['.msi']);
@@ -31,6 +35,7 @@ for (const releaseDir of releaseDirs) {
   await copyMatching(path.join(releaseDir, 'deb'), ['.deb']);
   await copyMatching(path.join(releaseDir, 'rpm'), ['.rpm']);
   await zipMacApps(path.join(releaseDir, 'macos'));
+  if (copied.length > before) break;
 }
 
 if (!copied.length) {
