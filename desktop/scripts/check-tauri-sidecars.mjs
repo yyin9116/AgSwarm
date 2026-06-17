@@ -74,7 +74,24 @@ function checkPiWebRuntime(target) {
       });
     }
   }
+  checkRuntimeTargetMarker(target);
   checkRuntimeArchiveIsZip(target);
+}
+
+function checkRuntimeTargetMarker(target) {
+  const markerPath = path.join(runtimeDir, '.agswarm-runtime-target');
+  try {
+    const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
+    if (marker.target !== target.triple) {
+      throw new Error(`runtime target is ${marker.target || '<missing>'}, expected ${target.triple}`);
+    }
+  } catch (error) {
+    missing.push({
+      target,
+      fileName: '.agswarm-runtime-target',
+      filePath: `${markerPath} (${error instanceof Error ? error.message : String(error)})`,
+    });
+  }
 }
 
 function checkRuntimeArchiveIsZip(target) {

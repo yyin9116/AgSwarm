@@ -4,6 +4,8 @@ import { isTauri } from '@tauri-apps/api/core';
 export const PI_WEB_BASE_URL = 'http://127.0.0.1:8504';
 const PI_WEB_LOCAL_API_PREFIX = '/api/machines/local';
 let piWebReadyPromise: Promise<void> | null = null;
+const PI_WEB_READY_TIMEOUT_MS = 90_000;
+const PI_WEB_READY_POLL_MS = 700;
 
 export type PiWebSessionInfo = {
   id: string;
@@ -234,10 +236,7 @@ async function ensurePiWebReadyOnce(): Promise<void> {
     return;
   }
   const status = await startPiWeb();
-  if (status.ok && status.running) {
-    return;
-  }
-  if (await canReachPiWebRuntime()) {
+  if ((status.ok && status.running) || await waitForPiWebRuntime(PI_WEB_READY_TIMEOUT_MS)) {
     return;
   }
   throw new Error(status.message || 'AgSwarm AI runtime did not start.');
@@ -506,6 +505,19 @@ async function canReachPiWebRuntime(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function waitForPiWebRuntime(timeoutMs: number): Promise<boolean> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await canReachPiWebRuntime()) return true;
+    await delay(PI_WEB_READY_POLL_MS);
+  }
+  return false;
+}
+
+function delay(timeoutMs: number): Promise<void> {
+  return new Promise(resolve => window.setTimeout(resolve, timeoutMs));
 }
 
 function piWebHttpBaseUrl(): string {

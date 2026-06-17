@@ -20,6 +20,8 @@ import { notifications } from '@mantine/notifications';
 import { Activity, Bot, BrainCircuit, CheckCircle2, Cpu, Download, ExternalLink, FileCode, Folder, Key, MonitorCog, Moon, Power, Radar, RefreshCw, Save, Sun, UserRound } from 'lucide-react';
 import type { DeviceAliasSettings, ThemeMode } from '../lib/settingsStore';
 import { checkForAppUpdate, installPendingAppUpdate, manualDownloadUrl, type AppUpdateInfo, type UpdateDownloadProgress } from '../lib/updatesService';
+import { testAgentProvider } from '../lib/agswarmApi';
+import type { AgentProviderTestResult } from '../types/agswarm';
 import type { LocalPeerStatus } from '../types/agswarm';
 
 interface SettingsViewProps {
@@ -106,6 +108,8 @@ export function SettingsView({
   const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
   const [updateStatus, setUpdateStatus] = useState('Check GitHub Releases for signed app updates.');
   const [updateProgress, setUpdateProgress] = useState<UpdateDownloadProgress | null>(null);
+  const [isTestingModel, setIsTestingModel] = useState(false);
+  const [modelTestResult, setModelTestResult] = useState<AgentProviderTestResult | null>(null);
 
   const restartPeer = async (showNotification: boolean) => {
     setIsRestartingPeer(true);
@@ -176,6 +180,40 @@ export function SettingsView({
       notifications.show({ color: 'red', title: 'Update install failed', message });
     } finally {
       setIsInstallingUpdate(false);
+    }
+  };
+
+  const handleTestModel = async () => {
+    setIsTestingModel(true);
+    setModelTestResult(null);
+    try {
+      const result = await testAgentProvider({
+        providerUrl,
+        apiKey,
+        model: modelName,
+        messages: [{ role: 'user', content: 'Reply with exactly: ok' }],
+        temperature: 0,
+      });
+      setModelTestResult(result);
+      notifications.show({
+        color: result.ok ? 'teal' : modelTestColor(result.category),
+        title: result.ok ? 'Model endpoint ready' : 'Model endpoint check failed',
+        message: result.message,
+      });
+    } catch (error) {
+      const result: AgentProviderTestResult = {
+        ok: false,
+        category: 'provider',
+        message: 'Could not run the model endpoint check.',
+        detail: formatError(error),
+        model: modelName,
+        providerUrl,
+        durationMs: 0,
+      };
+      setModelTestResult(result);
+      notifications.show({ color: 'red', title: 'Model test failed', message: result.message });
+    } finally {
+      setIsTestingModel(false);
     }
   };
 
@@ -313,16 +351,48 @@ export function SettingsView({
           </Stack>
         </SettingsCard>
 
-        <SettingsCard icon={<BrainCircuit size={16} />} title="AI & Agent Configuration">
-          <PasswordInput label="API Key" description="Bearer key for the local OpenAI-compatible provider" leftSection={<Key size={16} />} value={apiKey} onChange={(event) => onApiKeyChange(event.currentTarget.value)} />
+        <SettingsCard icon={<BrainCircuit size={16} />} title="Ag Model Service" rightSection={<Badge color={modelTestResult?.ok ? 'teal' : modelTestResult ? modelTestColor(modelTestResult.category) : 'gray'} variant="light">{modelTestResult?.ok ? 'Ready' : modelTestResult ? 'Needs attention' : 'Untested'}</Badge>}>
+          <Text size="sm" c="dimmed">
+            Ag uses this OpenAI-compatible endpoint through the local runtime. Test it here before starting a long agent task.
+          </Text>
+          <TextInput label="Endpoint" description="OpenAI-compatible base URL, for example http://127.0.0.1:15721" value={providerUrl} onChange={(event) => onProviderUrlChange(event.currentTarget.value)} />
+          <PasswordInput label="API Key" description="Bearer key for the configured model service" leftSection={<Key size={16} />} value={apiKey} onChange={(event) => onApiKeyChange(event.currentTarget.value)} />
           <Select
             label="Default Model"
-            description="Model used for reasoning"
+            description="Model Ag asks the runtime to use"
             leftSection={<Cpu size={16} />}
             value={modelName}
             onChange={(value) => onModelNameChange(value || 'gpt-5.5')}
             data={['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini']}
           />
+          {modelTestResult ? (
+            <Box className={`agswarm-model-test-result is-${modelTestResult.ok ? 'ok' : modelTestResult.category}`}>
+              <Group justify="space-between" gap="xs" align="flex-start">
+                <div>
+                  <Text fw={700} size="sm">{modelTestResult.message}</Text>
+                  <Text c="dimmed" size="xs">
+                    {modelTestResult.providerUrl} · {modelTestResult.model} · {modelTestResult.durationMs} ms
+                  </Text>
+                </div>
+                <Badge color={modelTestResult.ok ? 'teal' : modelTestColor(modelTestResult.category)} variant="light">
+                  {modelTestLabel(modelTestResult.category)}
+                </Badge>
+              </Group>
+              {modelTestResult.detail ? <Text mt={6} size="xs" c="dimmed">{modelTestResult.detail}</Text> : null}
+              {!modelTestResult.ok ? <Text mt={6} size="xs">{modelTestRecovery(modelTestResult.category)}</Text> : null}
+            </Box>
+          ) : null}
+          <Group justify="flex-end">
+            <Button
+              variant="light"
+              color="teal"
+              leftSection={isTestingModel ? <RefreshCw size={16} className="animate-spin" /> : <CheckCircle2 size={16} />}
+              onClick={handleTestModel}
+              loading={isTestingModel}
+            >
+              Test Model Endpoint
+            </Button>
+          </Group>
           <TextInput label="Host Working Directory" description="Base directory used by Ag and local desktop tools. Leave empty to use your AgSwarm workspace folder." leftSection={<Folder size={16} />} value={piCwd} onChange={(event) => onPiCwdChange(event.currentTarget.value)} />
           <Textarea label="Agent Skills" description="Comma-separated list of allowed skills" autosize minRows={3} value={agentSkills} onChange={(event) => onAgentSkillsChange(event.currentTarget.value)} />
         </SettingsCard>
@@ -358,7 +428,6 @@ export function SettingsView({
         </SettingsCard>
 
         <SettingsCard icon={<Radar size={16} />} title="Network">
-          <TextInput label="Agent Provider" description="Local OpenAI-compatible HTTP endpoint" value={providerUrl} onChange={(event) => onProviderUrlChange(event.currentTarget.value)} />
           <TextInput label="NATS Server" description="Control plane address" value={natsUrl} onChange={(event) => onNatsUrlChange(event.currentTarget.value)} />
           <TextInput label="LaTeX MCP Dir" description="Required for live LaTeX compile tasks" leftSection={<FileCode size={16} />} value={latexMcpDir} onChange={(event) => onLatexMcpDirChange(event.currentTarget.value)} />
         </SettingsCard>
@@ -397,6 +466,9 @@ function formatError(error: unknown): string {
 
 function updateErrorMessage(error: unknown): string {
   const message = formatError(error);
+  if (/latest\.json|github\.com|releases\/latest\/download|error sending request/i.test(message)) {
+    return 'Could not reach the signed update feed on GitHub. Check your network or proxy, then retry; manual downloads are still available from Releases.';
+  }
   if (/pubkey|signature|updater/i.test(message)) {
     return 'This build is not configured for signed automatic updates. Use the Releases link or install a build with updater signing enabled.';
   }
@@ -404,6 +476,44 @@ function updateErrorMessage(error: unknown): string {
     return 'Could not reach the update server. Check the network connection and try again.';
   }
   return message;
+}
+
+function modelTestColor(category: AgentProviderTestResult['category']): string {
+  if (category === 'ok') return 'teal';
+  if (category === 'auth' || category === 'model') return 'yellow';
+  return 'red';
+}
+
+function modelTestLabel(category: AgentProviderTestResult['category']): string {
+  switch (category) {
+    case 'ok':
+      return 'OK';
+    case 'network':
+      return 'Network';
+    case 'auth':
+      return 'Auth';
+    case 'model':
+      return 'Model';
+    case 'invalid_response':
+      return 'Response';
+    default:
+      return 'Provider';
+  }
+}
+
+function modelTestRecovery(category: AgentProviderTestResult['category']): string {
+  switch (category) {
+    case 'network':
+      return 'Make sure the local model service is running and the endpoint URL includes the correct protocol and port.';
+    case 'auth':
+      return 'Check the API key in Settings. Restart Ag after changing credentials if the provider caches auth.';
+    case 'model':
+      return 'Choose a model name that the provider exposes, then save settings and restart the local node.';
+    case 'invalid_response':
+      return 'The endpoint must speak the OpenAI chat completions API at /v1/chat/completions.';
+    default:
+      return 'The service is reachable but unavailable. Check provider quota, routing, and backend logs.';
+  }
 }
 
 function isThemeMode(value: string | null): value is ThemeMode {

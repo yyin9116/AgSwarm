@@ -67,6 +67,7 @@ const skipNode = args.skipNode === 'true';
 const skipBridge = args.skipBridge === 'true';
 const skipRuntime = args.skipRuntime === 'true';
 const skipPtyPrebuild = args.skipPtyPrebuild === 'true';
+const forceAll = args.force === 'true';
 
 if (!skipNode) {
   await prepareNodeSidecar(target, config, nodeVersion);
@@ -108,7 +109,7 @@ function currentTarget() {
 
 async function prepareNodeSidecar(target, targetConfig, version) {
   const destination = path.join(binariesDir, targetConfig.nodeName);
-  if (existsSync(destination) && args.forceNode !== 'true') {
+  if (existsSync(destination) && !forceAll && args.forceNode !== 'true') {
     console.log(`Node sidecar already exists for ${target}: ${destination}`);
     return;
   }
@@ -119,7 +120,7 @@ async function prepareNodeSidecar(target, targetConfig, version) {
   const extractDir = path.join(workDir, `${target}-node`);
   rmSync(extractDir, { recursive: true, force: true });
   mkdirSync(extractDir, { recursive: true });
-  if (args.forceNode === 'true') rmSync(archivePath, { force: true });
+  if (forceAll || args.forceNode === 'true') rmSync(archivePath, { force: true });
 
   console.log(`Downloading ${archiveUrl}`);
   await download(archiveUrl, archivePath);

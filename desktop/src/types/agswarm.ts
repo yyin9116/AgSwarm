@@ -90,6 +90,16 @@ export type AgentChatResponse = {
   }>;
 };
 
+export type AgentProviderTestResult = {
+  ok: boolean;
+  category: 'ok' | 'network' | 'auth' | 'model' | 'provider' | 'invalid_response';
+  message: string;
+  detail?: string;
+  model?: string;
+  providerUrl?: string;
+  durationMs: number;
+};
+
 export type LocalPeerRequest = {
   natsUrl: string;
   nodeId: string;

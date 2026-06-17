@@ -12,10 +12,6 @@ on:
       - "codex/**"
     tags:
       - "v*"
-    paths:
-      - ".github/workflows/desktop-build-release.yml"
-      - "desktop/**"
-      - "assets/icons/**"
   workflow_dispatch:
 
 permissions:
@@ -159,6 +155,11 @@ jobs:
         working-directory: ${{ matrix.project_path }}
         run: npm ci
 
+      - name: Check release version metadata
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: ${{ matrix.project_path }}
+        run: npm run check:release-version -- --version "${{ github.ref_name }}"
+
       - name: Prepare Tauri sidecars
         working-directory: ${{ matrix.project_path }}
         env:
@@ -216,6 +217,9 @@ jobs:
       - name: Checkout release notes
         uses: actions/checkout@v4
 
+      - name: Check release version metadata
+        run: node desktop/scripts/check-release-version.mjs --version "${GITHUB_REF_NAME}"
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
@@ -251,7 +255,11 @@ jobs:
             --out release-assets/latest.json
 
       - name: Verify updater release assets
-        run: node desktop/scripts/verify-release-assets.mjs --assets-dir release-assets
+        run: |
+          node desktop/scripts/verify-release-assets.mjs \
+            --assets-dir release-assets \
+            --version "${GITHUB_REF_NAME#v}" \
+            --tag "${GITHUB_REF_NAME}"
 
       - name: Publish GitHub Release with custom notes
         if: steps.notes.outputs.use_custom == 'true'

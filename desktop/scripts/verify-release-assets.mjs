@@ -4,6 +4,9 @@ import path from 'node:path';
 
 const args = parseArgs(process.argv.slice(2));
 const assetsDir = path.resolve(required(args.assetsDir, 'assets-dir'));
+const expectedVersion = normalizeVersion(args.version || process.env.GITHUB_REF_NAME || '');
+const expectedTag = args.tag || process.env.GITHUB_REF_NAME || (expectedVersion ? `v${expectedVersion}` : '');
+const expectedPlatforms = ['darwin-aarch64', 'windows-x86_64'];
 const latestPath = path.join(assetsDir, 'latest.json');
 
 if (!existsSync(latestPath)) {
@@ -11,6 +14,14 @@ if (!existsSync(latestPath)) {
 }
 
 const manifest = JSON.parse(readFileSync(latestPath, 'utf8'));
+if (expectedVersion && manifest.version !== expectedVersion) {
+  throw new Error(`Updater manifest version ${manifest.version || '<missing>'} does not match ${expectedVersion}`);
+}
+for (const platform of expectedPlatforms) {
+  if (!manifest.platforms?.[platform]) {
+    throw new Error(`Updater manifest is missing required platform entry: ${platform}`);
+  }
+}
 for (const [platform, entry] of Object.entries(manifest.platforms || {})) {
   if (!entry?.url || !entry?.signature) {
     throw new Error(`Invalid updater entry for ${platform}`);
@@ -18,10 +29,18 @@ for (const [platform, entry] of Object.entries(manifest.platforms || {})) {
   if (/^https?:\/\//iu.test(entry.signature)) {
     throw new Error(`Updater signature for ${platform} must be signature content, not a URL`);
   }
-  const fileName = decodeURIComponent(new URL(entry.url).pathname.split('/').pop() || '');
+  const url = new URL(entry.url);
+  if (expectedTag && !url.pathname.includes(`/releases/download/${expectedTag}/`)) {
+    throw new Error(`Updater URL for ${platform} does not point at ${expectedTag}: ${entry.url}`);
+  }
+  const fileName = decodeURIComponent(url.pathname.split('/').pop() || '');
   const assetPath = findAsset(fileName);
   if (!assetPath) {
     throw new Error(`Updater URL for ${platform} points to an asset that was not staged: ${fileName}`);
+  }
+  const signaturePath = findAsset(`${fileName}.sig`);
+  if (!signaturePath) {
+    throw new Error(`Updater URL for ${platform} is missing staged signature asset: ${fileName}.sig`);
   }
 }
 
@@ -58,4 +77,8 @@ function parseArgs(values) {
 function required(value, label) {
   if (!value) throw new Error(`Missing required ${label}`);
   return value;
+}
+
+function normalizeVersion(value) {
+  return String(value).trim().replace(/^refs\/tags\//u, '').replace(/^v/u, '');
 }

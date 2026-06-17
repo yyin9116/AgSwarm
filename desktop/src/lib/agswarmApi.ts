@@ -4,6 +4,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import type {
   AgentChatRequest,
   AgentChatResponse,
+  AgentProviderTestResult,
   CliRequest,
   CliResponse,
   DesktopAgentToolRequest,
@@ -111,6 +112,20 @@ export async function runAgentProviderChat(request: AgentChatRequest): Promise<A
     return requestPreviewProviderChat(request);
   }
   return invoke<AgentChatResponse>('agent_provider_chat', { request });
+}
+
+export async function testAgentProvider(request: AgentChatRequest): Promise<AgentProviderTestResult> {
+  if (!hasTauriRuntime()) {
+    return {
+      ok: true,
+      category: 'ok',
+      message: 'Preview mode can reach the configured model service proxy.',
+      model: request.model,
+      providerUrl: request.providerUrl,
+      durationMs: 0,
+    };
+  }
+  return invoke<AgentProviderTestResult>('test_agent_provider', { request });
 }
 
 export type PiStreamEvent = {

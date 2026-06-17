@@ -963,6 +963,36 @@ html[data-mantine-color-scheme="dark"] {
     padding: 0.28rem 0.6rem;
   }
 
+  .pi-gui-boot-card {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.85rem;
+    max-width: min(34rem, 100%);
+    border: 1px solid color-mix(in srgb, var(--agswarm-border) 80%, transparent);
+    border-radius: 0.9rem;
+    background: var(--agswarm-surface-elevated);
+    box-shadow: 0 18px 42px rgba(15, 23, 42, 0.08);
+    color: var(--agswarm-text);
+    margin: 2rem auto;
+    padding: 0.95rem 1rem;
+  }
+
+  .pi-gui-boot-card div {
+    display: grid;
+    gap: 0.16rem;
+  }
+
+  .pi-gui-boot-card strong {
+    font-size: 0.9rem;
+    line-height: 1.25;
+  }
+
+  .pi-gui-boot-card span {
+    color: var(--agswarm-text-muted);
+    font-size: 0.76rem;
+    line-height: 1.45;
+  }
+
   .pi-gui-tool-detail {
     max-height: 13rem;
     overflow: auto;
@@ -1734,6 +1764,27 @@ html[data-mantine-color-scheme="dark"] #root {
     overflow-y: auto;
     overflow-x: hidden;
     -webkit-overflow-scrolling: touch;
+  }
+  .agswarm-model-test-result {
+    border: 1px solid color-mix(in srgb, var(--agswarm-border) 78%, transparent);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--agswarm-surface) 92%, var(--agswarm-accent-soft));
+    padding: 0.75rem 0.85rem;
+  }
+  .agswarm-model-test-result.is-ok {
+    border-color: color-mix(in srgb, #14b8a6 34%, var(--agswarm-border));
+    background: color-mix(in srgb, #14b8a6 8%, var(--agswarm-surface));
+  }
+  .agswarm-model-test-result.is-auth,
+  .agswarm-model-test-result.is-model {
+    border-color: color-mix(in srgb, #f59e0b 34%, var(--agswarm-border));
+    background: color-mix(in srgb, #f59e0b 8%, var(--agswarm-surface));
+  }
+  .agswarm-model-test-result.is-network,
+  .agswarm-model-test-result.is-provider,
+  .agswarm-model-test-result.is-invalid_response {
+    border-color: color-mix(in srgb, #ef4444 30%, var(--agswarm-border));
+    background: color-mix(in srgb, #ef4444 7%, var(--agswarm-surface));
   }
   .agswarm-chat-message-row {
     display: flex;

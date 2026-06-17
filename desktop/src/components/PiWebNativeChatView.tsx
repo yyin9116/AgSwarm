@@ -167,11 +167,13 @@ export function PiWebNativeChatView({
   const [isBooting, setIsBooting] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isAwaitingAgent, setIsAwaitingAgent] = useState(false);
+  const [bootMessage, setBootMessage] = useState('Starting Ag runtime...');
   const [errorText, setErrorText] = useState('');
   const paneRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
+  const submitInFlightRef = useRef(false);
 
   const selectedSession = useMemo(
     () => sessions.find(session => session.id === selectedSessionId) || sessions.find(session => !session.archived) || sessions[0],
@@ -283,6 +285,7 @@ export function PiWebNativeChatView({
   useEffect(() => {
     let cancelled = false;
     setIsBooting(true);
+    setBootMessage('Starting Ag runtime...');
     loadSessions({ createIfEmpty: true })
       .catch(error => {
         if (!cancelled) setErrorText(error instanceof Error ? error.message : String(error));
@@ -411,24 +414,26 @@ export function PiWebNativeChatView({
 
   const submit = useCallback(async () => {
     const text = composerText.trim();
-    if ((!text && !attachments.length) || selectedSession?.archived || isSubmitting) return;
+    if ((!text && !attachments.length) || selectedSession?.archived || isBooting || submitInFlightRef.current) return;
     const submittedAttachments = attachments;
     const visibleText = text || attachmentOnlyPrompt(submittedAttachments);
-    setComposerText('');
-    setAttachments([]);
-    setCommandPanelOpen(false);
     setErrorText('');
+    submitInFlightRef.current = true;
     setIsSubmitting(true);
-    setTimelineItems(items => [...items, userTimelineMessage(withAttachmentSummary(visibleText, submittedAttachments))]);
     try {
       let session = selectedSession;
       if (!session) {
+        setBootMessage('Preparing a conversation...');
         await ensurePiWebReady();
         const created = await startPiWebSession(cwd);
         setSessions(current => [created, ...current.filter(item => item.id !== created.id)]);
         setSelectedSessionId(created.id);
         session = created;
       }
+      setComposerText('');
+      setAttachments([]);
+      setCommandPanelOpen(false);
+      setTimelineItems(items => [...items, userTimelineMessage(withAttachmentSummary(visibleText, submittedAttachments))]);
       const promptText = withAttachmentPrompt(visibleText, submittedAttachments);
       const prompt = withAgSwarmRuntimeContext(promptText, {
         devices,
@@ -458,10 +463,11 @@ export function PiWebNativeChatView({
       setErrorText(message);
       setTimelineItems(items => [...items, errorActivity(message)]);
     } finally {
+      submitInFlightRef.current = false;
       setIsSubmitting(false);
       window.setTimeout(() => composerRef.current?.focus(), 80);
     }
-  }, [applyCommandResultToTimeline, attachments, composerText, cwd, deviceStatusMessage, devices, displayDeviceLabel, isSubmitting, localNodeId, selectedSession]);
+  }, [applyCommandResultToTimeline, attachments, composerText, cwd, deviceStatusMessage, devices, displayDeviceLabel, isBooting, localNodeId, selectedSession]);
 
   const isRunning = Boolean(status?.isStreaming || status?.isCompacting || status?.isBashRunning || isSubmitting || isAwaitingAgent);
   const canStop = Boolean(selectedSession && !selectedSession.archived && (
@@ -612,7 +618,13 @@ export function PiWebNativeChatView({
         <div ref={paneRef} className="pi-gui-timeline-pane">
           <div className="pi-gui-timeline">
             {isBooting ? (
-              <div className="pi-gui-empty"><Loader size="sm" color="teal" /></div>
+              <div className="pi-gui-boot-card" role="status" aria-live="polite">
+                <Loader size="sm" color="teal" />
+                <div>
+                  <strong>{bootMessage}</strong>
+                  <span>First launch can take longer while Ag prepares the local runtime.</span>
+                </div>
+              </div>
             ) : timelineItems.length ? buildTimelineRows(timelineItems).map(row => (
               <TimelineRow
                 key={row.kind === 'single' ? row.item.id : row.id}
@@ -689,15 +701,22 @@ export function PiWebNativeChatView({
                 void attachFiles(files);
               }}
             />
-            <ActionIcon variant="subtle" color="gray" radius="xl" aria-label="Attach files" onClick={() => void chooseAttachments()}>
+            <ActionIcon
+              variant="subtle"
+              color="gray"
+              radius="xl"
+              aria-label="Attach files"
+              disabled={isBooting || Boolean(selectedSession?.archived)}
+              onClick={() => void chooseAttachments()}
+            >
               <Plus size={18} />
             </ActionIcon>
             <textarea
               ref={composerRef}
               value={composerText}
               rows={1}
-              placeholder={selectedSession ? `Ask ${assistantLabel} in ${shortPath(cwd)}...` : `Ask ${assistantLabel} in ${shortPath(cwd)}...`}
-              disabled={Boolean(selectedSession?.archived)}
+              placeholder={isBooting ? 'Ag is starting...' : selectedSession ? `Ask ${assistantLabel} in ${shortPath(cwd)}...` : `Ask ${assistantLabel} in ${shortPath(cwd)}...`}
+              disabled={isBooting || Boolean(selectedSession?.archived)}
               onChange={(event) => {
                 const value = event.currentTarget.value;
                 setComposerText(value);
@@ -715,7 +734,7 @@ export function PiWebNativeChatView({
               color={canStop ? 'gray' : 'teal'}
               radius="xl"
               aria-label={canStop ? 'Stop' : 'Send'}
-              disabled={!canStop && ((!composerText.trim() && !attachments.length) || Boolean(selectedSession?.archived))}
+              disabled={!canStop && (isBooting || isSubmitting || (!composerText.trim() && !attachments.length) || Boolean(selectedSession?.archived))}
               onClick={() => {
                 if (canStop) void stopActiveWork();
                 else void submit();

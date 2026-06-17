@@ -59,6 +59,18 @@ struct AgentChatRequest {
     temperature: Option<f64>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentProviderTestResult {
+    ok: bool,
+    category: String,
+    message: String,
+    detail: Option<String>,
+    model: Option<String>,
+    provider_url: Option<String>,
+    duration_ms: u128,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FrontendDebugLogRequest {
@@ -1320,6 +1332,204 @@ async fn agent_provider_chat(request: AgentChatRequest) -> Result<Value, String>
 }
 
 #[tauri::command]
+async fn test_agent_provider(request: AgentChatRequest) -> AgentProviderTestResult {
+    let started = Instant::now();
+    let provider_url = request.provider_url.trim().trim_end_matches('/').to_string();
+    if provider_url.is_empty() {
+        return provider_test_result(
+            false,
+            "provider",
+            "Model service endpoint is empty.",
+            Some("Set the Ag model service endpoint before testing.".to_string()),
+            request.model,
+            request.provider_url,
+            started,
+        );
+    }
+
+    let endpoint = format!("{provider_url}/v1/chat/completions");
+    let body = serde_json::json!({
+        "model": request.model,
+        "messages": [
+            {
+                "role": "user",
+                "content": "Reply with exactly: ok"
+            }
+        ],
+        "temperature": 0,
+        "max_tokens": 8
+    });
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => {
+            return provider_test_result(
+                false,
+                "provider",
+                "Could not create the model service client.",
+                Some(err.to_string()),
+                request.model,
+                request.provider_url,
+                started,
+            );
+        }
+    };
+    let mut builder = client.post(endpoint).json(&body);
+    if let Some(api_key) = request.api_key.filter(|value| !value.trim().is_empty()) {
+        builder = builder.bearer_auth(api_key);
+    }
+
+    let response = match builder.send().await {
+        Ok(response) => response,
+        Err(err) => {
+            return provider_test_result(
+                false,
+                "network",
+                "Could not reach the configured model service endpoint.",
+                Some(err.to_string()),
+                request.model,
+                request.provider_url,
+                started,
+            );
+        }
+    };
+    let status = response.status();
+    let text = match response.text().await {
+        Ok(text) => text,
+        Err(err) => {
+            return provider_test_result(
+                false,
+                "invalid_response",
+                "The model service replied, but the response could not be read.",
+                Some(err.to_string()),
+                request.model,
+                request.provider_url,
+                started,
+            );
+        }
+    };
+
+    if !status.is_success() {
+        let category = provider_error_category(status.as_u16(), &text);
+        return provider_test_result(
+            false,
+            category,
+            provider_error_message(category),
+            Some(limit_diagnostic_text(format!("HTTP {status}: {text}"))),
+            request.model,
+            request.provider_url,
+            started,
+        );
+    }
+
+    let parsed: Value = match serde_json::from_str(&text) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            return provider_test_result(
+                false,
+                "invalid_response",
+                "The model service replied, but not with OpenAI-compatible JSON.",
+                Some(limit_diagnostic_text(format!("{err}: {text}"))),
+                request.model,
+                request.provider_url,
+                started,
+            );
+        }
+    };
+    let content = parsed
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+
+    if content.is_empty() {
+        return provider_test_result(
+            false,
+            "invalid_response",
+            "The model service responded, but no assistant text was returned.",
+            Some(limit_diagnostic_text(text)),
+            request.model,
+            request.provider_url,
+            started,
+        );
+    }
+
+    provider_test_result(
+        true,
+        "ok",
+        "Model endpoint is reachable and returned a valid response.",
+        Some(format!("Sample response: {content}")),
+        request.model,
+        request.provider_url,
+        started,
+    )
+}
+
+fn provider_test_result(
+    ok: bool,
+    category: &str,
+    message: &str,
+    detail: Option<String>,
+    model: String,
+    provider_url: String,
+    started: Instant,
+) -> AgentProviderTestResult {
+    AgentProviderTestResult {
+        ok,
+        category: category.to_string(),
+        message: message.to_string(),
+        detail,
+        model: Some(model),
+        provider_url: Some(provider_url),
+        duration_ms: started.elapsed().as_millis(),
+    }
+}
+
+fn provider_error_category(status: u16, text: &str) -> &'static str {
+    if status == 401 || status == 403 {
+        return "auth";
+    }
+    let lower_text = text.to_ascii_lowercase();
+    if status == 404
+        || lower_text.contains("model_not_found")
+        || lower_text.contains("model not found")
+        || lower_text.contains("unknown model")
+    {
+        return "model";
+    }
+    if status == 429 || status >= 500 {
+        return "provider";
+    }
+    "provider"
+}
+
+fn provider_error_message(category: &str) -> &'static str {
+    match category {
+        "auth" => "The model service rejected the API key.",
+        "model" => "The model service is reachable, but the selected model was not accepted.",
+        "network" => "Could not reach the configured model service endpoint.",
+        "invalid_response" => "The model service returned an unsupported response.",
+        _ => "The model provider is currently unavailable.",
+    }
+}
+
+fn limit_diagnostic_text(text: String) -> String {
+    const LIMIT: usize = 2_000;
+    if text.len() <= LIMIT {
+        return text;
+    }
+    let mut truncated = text.chars().take(LIMIT).collect::<String>();
+    truncated.push_str("\n...[truncated]");
+    truncated
+}
+
+#[tauri::command]
 fn desktop_agent_tool(
     request: DesktopAgentToolRequest,
 ) -> Result<DesktopAgentToolResponse, String> {
@@ -1596,8 +1806,11 @@ impl ManagedPiWeb {
             wait_for_tcp_port_closed("127.0.0.1:8504", Duration::from_secs(2))?;
         }
         if self.server_running() && self.sessiond_running() {
-            wait_for_pi_web_runtime("127.0.0.1:8504", Duration::from_secs(30))?;
-            self.last_message = "Ag runtime is ready on 127.0.0.1:8504.".to_string();
+            self.last_message = if pi_web_runtime_healthy("127.0.0.1:8504") {
+                "Ag runtime is ready on 127.0.0.1:8504.".to_string()
+            } else {
+                "Ag runtime is starting on 127.0.0.1:8504.".to_string()
+            };
             return Ok(());
         }
 
@@ -1677,9 +1890,8 @@ impl ManagedPiWeb {
         self.data_dir = Some(data_dir);
         self.last_server_exit_code = None;
 
-        wait_for_pi_web_runtime("127.0.0.1:8504", Duration::from_secs(30))?;
         self.last_message = format!(
-            "Started Ag runtime on 127.0.0.1:8504 with workspace {}.",
+            "Starting Ag runtime on 127.0.0.1:8504 with workspace {}.",
             workspace_dir.to_string_lossy()
         );
         Ok(())
@@ -2362,19 +2574,6 @@ fn wait_for_tcp_port_closed(addr: &str, timeout: Duration) -> Result<(), String>
     ))
 }
 
-fn wait_for_pi_web_runtime(addr: &str, timeout: Duration) -> Result<(), String> {
-    let started = Instant::now();
-    while started.elapsed() < timeout {
-        if pi_web_runtime_healthy(addr) {
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(160));
-    }
-    Err(format!(
-        "Ag runtime did not become healthy at {addr}; check the app data logs for pi-web-server.err.log and pi-web-sessiond.err.log."
-    ))
-}
-
 struct TimedCommandOutput {
     stdout: String,
     stderr: String,
@@ -2708,6 +2907,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             agswarm_cli,
             agent_provider_chat,
+            test_agent_provider,
             desktop_agent_tool,
             start_local_peer,
             stop_local_peer,
