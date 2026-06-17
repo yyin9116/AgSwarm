@@ -963,34 +963,112 @@ html[data-mantine-color-scheme="dark"] {
     padding: 0.28rem 0.6rem;
   }
 
-  .pi-gui-boot-card {
+  .pi-gui-boot-screen {
+    grid-row: 3;
+    display: grid;
+    min-height: 0;
+    place-items: center;
+    background:
+      radial-gradient(circle at 50% 18%, color-mix(in srgb, var(--agswarm-accent-soft) 48%, transparent), transparent 34%),
+      var(--agswarm-surface);
+    padding: 2rem;
+  }
+
+  .pi-gui-boot-panel {
+    display: grid;
+    width: min(34rem, 100%);
+    gap: 1rem;
+    justify-items: center;
+    color: var(--agswarm-text);
+    text-align: center;
+  }
+
+  .pi-gui-boot-mark {
+    display: grid;
+    width: 3.25rem;
+    height: 3.25rem;
+    place-items: center;
+    border: 1px solid color-mix(in srgb, #14b8a6 28%, var(--agswarm-border));
+    border-radius: 999px;
+    background: color-mix(in srgb, #14b8a6 10%, var(--agswarm-surface-elevated));
+    color: #0f766e;
+    box-shadow: 0 16px 40px rgba(15, 118, 110, 0.14);
+  }
+
+  .pi-gui-boot-copy {
+    display: grid;
+    gap: 0.45rem;
+  }
+
+  .pi-gui-boot-copy > span {
+    color: var(--agswarm-text-muted);
+    font-size: 0.75rem;
+    font-weight: 750;
+    letter-spacing: 0;
+    text-transform: uppercase;
+  }
+
+  .pi-gui-boot-copy h2 {
+    margin: 0;
+    font-size: clamp(1.55rem, 2.5vw, 2.25rem);
+    font-weight: 760;
+    line-height: 1.08;
+    letter-spacing: 0;
+  }
+
+  .pi-gui-boot-copy p {
+    margin: 0;
+    color: var(--agswarm-text-muted);
+    font-size: 0.9rem;
+    line-height: 1.55;
+  }
+
+  .pi-gui-boot-steps {
+    display: grid;
+    width: min(27rem, 100%);
+    gap: 0.5rem;
+    margin-top: 0.35rem;
+  }
+
+  .pi-gui-boot-steps div {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 0.65rem;
+    border: 1px solid color-mix(in srgb, var(--agswarm-border) 70%, transparent);
+    border-radius: 0.8rem;
+    background: color-mix(in srgb, var(--agswarm-surface-elevated) 82%, transparent);
+    padding: 0.72rem 0.85rem;
+    color: var(--agswarm-text-muted);
+    font-size: 0.8rem;
+    text-align: left;
+  }
+
+  .pi-gui-boot-error {
     display: inline-flex;
     align-items: center;
-    gap: 0.85rem;
-    max-width: min(34rem, 100%);
-    border: 1px solid color-mix(in srgb, var(--agswarm-border) 80%, transparent);
-    border-radius: 0.9rem;
-    background: var(--agswarm-surface-elevated);
-    box-shadow: 0 18px 42px rgba(15, 23, 42, 0.08);
+    gap: 0.55rem;
+    max-width: min(28rem, 100%);
+    border: 1px solid color-mix(in srgb, #ef4444 28%, transparent);
+    border-radius: 0.85rem;
+    background: color-mix(in srgb, #fee2e2 58%, var(--agswarm-surface));
+    padding: 0.65rem 0.75rem;
     color: var(--agswarm-text);
-    margin: 2rem auto;
-    padding: 0.95rem 1rem;
+    font-size: 0.78rem;
+    line-height: 1.35;
+    text-align: left;
   }
 
-  .pi-gui-boot-card div {
-    display: grid;
-    gap: 0.16rem;
-  }
-
-  .pi-gui-boot-card strong {
-    font-size: 0.9rem;
-    line-height: 1.25;
-  }
-
-  .pi-gui-boot-card span {
-    color: var(--agswarm-text-muted);
-    font-size: 0.76rem;
-    line-height: 1.45;
+  .pi-gui-boot-error button {
+    flex: 0 0 auto;
+    border: 0;
+    border-radius: 999px;
+    background: color-mix(in srgb, #ef4444 12%, var(--agswarm-surface-elevated));
+    color: #991b1b;
+    cursor: pointer;
+    font: inherit;
+    font-weight: 700;
+    padding: 0.32rem 0.68rem;
   }
 
   .pi-gui-tool-detail {
@@ -1770,6 +1848,26 @@ html[data-mantine-color-scheme="dark"] #root {
     border-radius: 10px;
     background: color-mix(in srgb, var(--agswarm-surface) 92%, var(--agswarm-accent-soft));
     padding: 0.75rem 0.85rem;
+  }
+
+  .agswarm-update-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.55rem;
+  }
+
+  .agswarm-update-meta,
+  .agswarm-diagnostic-check {
+    min-width: 0;
+    border: 1px solid color-mix(in srgb, var(--agswarm-border) 72%, transparent);
+    border-radius: 0.65rem;
+    background: color-mix(in srgb, var(--agswarm-surface-elevated) 72%, transparent);
+    padding: 0.52rem 0.6rem;
+  }
+
+  .agswarm-update-meta .mantine-Text-root,
+  .agswarm-diagnostic-check .mantine-Text-root {
+    overflow-wrap: anywhere;
   }
   .agswarm-model-test-result.is-ok {
     border-color: color-mix(in srgb, #14b8a6 34%, var(--agswarm-border));

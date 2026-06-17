@@ -1,11 +1,12 @@
 import { isTauri } from '@tauri-apps/api/core';
+import { getVersion } from '@tauri-apps/api/app';
 import { check, type DownloadEvent, type Update } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 
 export type UpdateCheckResult =
-  | { status: 'unavailable'; message: string }
-  | { status: 'current'; currentVersion?: string; message: string }
-  | { status: 'available'; update: AppUpdateInfo };
+  | { status: 'unavailable'; currentVersion?: string; checkedAt: string; feedUrl: string; message: string }
+  | { status: 'current'; currentVersion?: string; checkedAt: string; feedUrl: string; message: string }
+  | { status: 'available'; currentVersion?: string; checkedAt: string; feedUrl: string; update: AppUpdateInfo };
 
 export type AppUpdateInfo = {
   version: string;
@@ -22,11 +23,17 @@ export type UpdateDownloadProgress = {
 };
 
 let pendingUpdate: Update | null = null;
+const UPDATE_FEED_URL = 'https://github.com/yyin9116/AgSwarm/releases/latest/download/latest.json';
 
 export async function checkForAppUpdate(): Promise<UpdateCheckResult> {
+  const checkedAt = new Date().toISOString();
+  const currentVersion = await getCurrentAppVersion();
   if (!isTauri()) {
     return {
       status: 'unavailable',
+      currentVersion,
+      checkedAt,
+      feedUrl: UPDATE_FEED_URL,
       message: 'Software updates are only available in the desktop app.',
     };
   }
@@ -38,12 +45,18 @@ export async function checkForAppUpdate(): Promise<UpdateCheckResult> {
   if (!update) {
     return {
       status: 'current',
-      message: 'AgSwarm is up to date.',
+      currentVersion,
+      checkedAt,
+      feedUrl: UPDATE_FEED_URL,
+      message: currentVersion ? `AgSwarm ${currentVersion} is up to date.` : 'AgSwarm is up to date.',
     };
   }
 
   return {
     status: 'available',
+    currentVersion: update.currentVersion || currentVersion,
+    checkedAt,
+    feedUrl: UPDATE_FEED_URL,
     update: normalizeUpdate(update),
   };
 }
@@ -80,6 +93,14 @@ export function manualDownloadUrl(): string {
   return 'https://github.com/yyin9116/AgSwarm/releases/latest';
 }
 
+export function updateFeedUrl(): string {
+  return UPDATE_FEED_URL;
+}
+
+export async function installedAppVersion(): Promise<string | undefined> {
+  return getCurrentAppVersion();
+}
+
 function normalizeUpdate(update: Update): AppUpdateInfo {
   return {
     version: update.version,
@@ -87,6 +108,17 @@ function normalizeUpdate(update: Update): AppUpdateInfo {
     date: update.date,
     notes: update.body,
   };
+}
+
+async function getCurrentAppVersion(): Promise<string | undefined> {
+  if (!isTauri()) {
+    return (import.meta as unknown as { env?: { VITE_APP_VERSION?: string } }).env?.VITE_APP_VERSION;
+  }
+  try {
+    return await getVersion();
+  } catch {
+    return undefined;
+  }
 }
 
 function percent(downloadedBytes: number, totalBytes?: number): number | undefined {

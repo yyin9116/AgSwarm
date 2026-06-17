@@ -97,6 +97,15 @@ export type AgentProviderTestResult = {
   detail?: string;
   model?: string;
   providerUrl?: string;
+  endpoint?: string;
+  durationMs: number;
+  checks?: AgentProviderDiagnosticCheck[];
+};
+
+export type AgentProviderDiagnosticCheck = {
+  label: string;
+  status: 'success' | 'warning' | 'error';
+  detail: string;
   durationMs: number;
 };
 

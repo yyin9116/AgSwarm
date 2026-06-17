@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   Badge,
@@ -19,7 +19,7 @@ import {
 import { notifications } from '@mantine/notifications';
 import { Activity, Bot, BrainCircuit, CheckCircle2, Cpu, Download, ExternalLink, FileCode, Folder, Key, MonitorCog, Moon, Power, Radar, RefreshCw, Save, Sun, UserRound } from 'lucide-react';
 import type { DeviceAliasSettings, ThemeMode } from '../lib/settingsStore';
-import { checkForAppUpdate, installPendingAppUpdate, manualDownloadUrl, type AppUpdateInfo, type UpdateDownloadProgress } from '../lib/updatesService';
+import { checkForAppUpdate, installPendingAppUpdate, installedAppVersion, manualDownloadUrl, updateFeedUrl, type AppUpdateInfo, type UpdateDownloadProgress } from '../lib/updatesService';
 import { testAgentProvider } from '../lib/agswarmApi';
 import type { AgentProviderTestResult } from '../types/agswarm';
 import type { LocalPeerStatus } from '../types/agswarm';
@@ -107,9 +107,24 @@ export function SettingsView({
   const [isInstallingUpdate, setIsInstallingUpdate] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
   const [updateStatus, setUpdateStatus] = useState('Check GitHub Releases for signed app updates.');
+  const [updateCurrentVersion, setUpdateCurrentVersion] = useState('Detecting...');
+  const [updateLatestVersion, setUpdateLatestVersion] = useState('');
+  const [updateCheckedAt, setUpdateCheckedAt] = useState('');
   const [updateProgress, setUpdateProgress] = useState<UpdateDownloadProgress | null>(null);
   const [isTestingModel, setIsTestingModel] = useState(false);
   const [modelTestResult, setModelTestResult] = useState<AgentProviderTestResult | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    installedAppVersion()
+      .then(version => {
+        if (!cancelled && version) setUpdateCurrentVersion(version);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const restartPeer = async (showNotification: boolean) => {
     setIsRestartingPeer(true);
@@ -141,12 +156,16 @@ export function SettingsView({
     setUpdateProgress(null);
     try {
       const result = await checkForAppUpdate();
+      setUpdateCurrentVersion(result.currentVersion || 'Unknown');
+      setUpdateCheckedAt(result.checkedAt);
       if (result.status === 'available') {
         setUpdateInfo(result.update);
-        setUpdateStatus(`Version ${result.update.version} is ready to install.`);
+        setUpdateLatestVersion(result.update.version);
+        setUpdateStatus(`AgSwarm ${result.update.currentVersion} can update to ${result.update.version}.`);
         notifications.show({ color: 'teal', title: 'Update available', message: `AgSwarm ${result.update.version} is ready.` });
       } else {
         setUpdateInfo(null);
+        setUpdateLatestVersion(result.status === 'current' ? (result.currentVersion || '') : '');
         setUpdateStatus(result.message);
         notifications.show({ color: result.status === 'current' ? 'teal' : 'yellow', title: result.status === 'current' ? 'Up to date' : 'Updates unavailable', message: result.message });
       }
@@ -208,7 +227,9 @@ export function SettingsView({
         detail: formatError(error),
         model: modelName,
         providerUrl,
+        endpoint: providerUrl,
         durationMs: 0,
+        checks: [],
       };
       setModelTestResult(result);
       notifications.show({ color: 'red', title: 'Model test failed', message: result.message });
@@ -299,6 +320,12 @@ export function SettingsView({
               </Text>
             </div>
             <Text c={updateInfo ? 'teal' : 'dimmed'} size="sm">{updateStatus}</Text>
+            <Box className="agswarm-update-grid">
+              <UpdateMeta label="Current version" value={updateCurrentVersion} />
+              <UpdateMeta label="Latest version" value={updateLatestVersion || (updateInfo?.version ?? 'Check required')} />
+              <UpdateMeta label="Update feed" value={updateFeedUrl()} />
+              <UpdateMeta label="Last checked" value={updateCheckedAt ? new Date(updateCheckedAt).toLocaleString() : 'Not checked yet'} />
+            </Box>
             {updateInfo ? (
               <Box className="agswarm-update-notes">
                 <Text fw={600} size="sm">AgSwarm {updateInfo.version}</Text>
@@ -373,11 +400,27 @@ export function SettingsView({
                   <Text c="dimmed" size="xs">
                     {modelTestResult.providerUrl} · {modelTestResult.model} · {modelTestResult.durationMs} ms
                   </Text>
+                  {modelTestResult.endpoint ? <Text c="dimmed" size="xs">Endpoint: {modelTestResult.endpoint}</Text> : null}
                 </div>
                 <Badge color={modelTestResult.ok ? 'teal' : modelTestColor(modelTestResult.category)} variant="light">
                   {modelTestLabel(modelTestResult.category)}
                 </Badge>
               </Group>
+              {modelTestResult.checks?.length ? (
+                <Stack gap={6} mt="sm">
+                  {modelTestResult.checks.map((check, index) => (
+                    <Group key={`${check.label}-${index}`} className="agswarm-diagnostic-check" justify="space-between" align="flex-start" wrap="nowrap">
+                      <div>
+                        <Text size="xs" fw={700}>{check.label}</Text>
+                        <Text size="xs" c="dimmed">{check.detail}</Text>
+                      </div>
+                      <Badge size="xs" color={diagnosticCheckColor(check.status)} variant="light">
+                        {check.status} · {check.durationMs} ms
+                      </Badge>
+                    </Group>
+                  ))}
+                </Stack>
+              ) : null}
               {modelTestResult.detail ? <Text mt={6} size="xs" c="dimmed">{modelTestResult.detail}</Text> : null}
               {!modelTestResult.ok ? <Text mt={6} size="xs">{modelTestRecovery(modelTestResult.category)}</Text> : null}
             </Box>
@@ -516,8 +559,23 @@ function modelTestRecovery(category: AgentProviderTestResult['category']): strin
   }
 }
 
+function diagnosticCheckColor(status: 'success' | 'warning' | 'error'): string {
+  if (status === 'success') return 'teal';
+  if (status === 'warning') return 'yellow';
+  return 'red';
+}
+
 function isThemeMode(value: string | null): value is ThemeMode {
   return value === 'system' || value === 'light' || value === 'dark';
+}
+
+function UpdateMeta({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="agswarm-update-meta">
+      <Text size="xs" c="dimmed">{label}</Text>
+      <Text size="xs" fw={650}>{value}</Text>
+    </div>
+  );
 }
 
 function SettingsCard({

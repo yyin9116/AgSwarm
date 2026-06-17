@@ -68,6 +68,17 @@ struct AgentProviderTestResult {
     detail: Option<String>,
     model: Option<String>,
     provider_url: Option<String>,
+    endpoint: Option<String>,
+    duration_ms: u128,
+    checks: Vec<AgentProviderDiagnosticCheck>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentProviderDiagnosticCheck {
+    label: String,
+    status: String,
+    detail: String,
     duration_ms: u128,
 }
 
@@ -1298,10 +1309,7 @@ fn system_device_name() -> String {
 
 #[tauri::command]
 async fn agent_provider_chat(request: AgentChatRequest) -> Result<Value, String> {
-    let endpoint = format!(
-        "{}/v1/chat/completions",
-        request.provider_url.trim_end_matches('/')
-    );
+    let endpoint = provider_chat_endpoint(request.provider_url.trim().trim_end_matches('/'));
     let body = serde_json::json!({
         "model": request.model,
         "messages": request.messages,
@@ -1343,11 +1351,13 @@ async fn test_agent_provider(request: AgentChatRequest) -> AgentProviderTestResu
             Some("Set the Ag model service endpoint before testing.".to_string()),
             request.model,
             request.provider_url,
+            None,
+            Vec::new(),
             started,
         );
     }
 
-    let endpoint = format!("{provider_url}/v1/chat/completions");
+    let endpoint = provider_chat_endpoint(&provider_url);
     let body = serde_json::json!({
         "model": request.model,
         "messages": [
@@ -1359,6 +1369,7 @@ async fn test_agent_provider(request: AgentChatRequest) -> AgentProviderTestResu
         "temperature": 0,
         "max_tokens": 8
     });
+    let mut checks = Vec::new();
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()
@@ -1372,18 +1383,39 @@ async fn test_agent_provider(request: AgentChatRequest) -> AgentProviderTestResu
                 Some(err.to_string()),
                 request.model,
                 request.provider_url,
+                Some(endpoint),
+                checks,
                 started,
             );
         }
     };
-    let mut builder = client.post(endpoint).json(&body);
+
+    checks.push(run_network_probe(
+        &client,
+        "GitHub update feed",
+        "https://github.com/yyin9116/AgSwarm/releases/latest/download/latest.json",
+    ).await);
+    checks.push(run_network_probe(
+        &client,
+        "Model service base URL",
+        &provider_url,
+    ).await);
+
+    let mut builder = client.post(endpoint.clone()).json(&body);
     if let Some(api_key) = request.api_key.filter(|value| !value.trim().is_empty()) {
         builder = builder.bearer_auth(api_key);
     }
 
+    let chat_started = Instant::now();
     let response = match builder.send().await {
         Ok(response) => response,
         Err(err) => {
+            checks.push(AgentProviderDiagnosticCheck {
+                label: "Chat completions endpoint".to_string(),
+                status: "error".to_string(),
+                detail: err.to_string(),
+                duration_ms: chat_started.elapsed().as_millis(),
+            });
             return provider_test_result(
                 false,
                 "network",
@@ -1391,6 +1423,8 @@ async fn test_agent_provider(request: AgentChatRequest) -> AgentProviderTestResu
                 Some(err.to_string()),
                 request.model,
                 request.provider_url,
+                Some(endpoint),
+                checks,
                 started,
             );
         }
@@ -1399,6 +1433,12 @@ async fn test_agent_provider(request: AgentChatRequest) -> AgentProviderTestResu
     let text = match response.text().await {
         Ok(text) => text,
         Err(err) => {
+            checks.push(AgentProviderDiagnosticCheck {
+                label: "Chat completions endpoint".to_string(),
+                status: "error".to_string(),
+                detail: format!("HTTP {status}, but the response body could not be read: {err}"),
+                duration_ms: chat_started.elapsed().as_millis(),
+            });
             return provider_test_result(
                 false,
                 "invalid_response",
@@ -1406,6 +1446,8 @@ async fn test_agent_provider(request: AgentChatRequest) -> AgentProviderTestResu
                 Some(err.to_string()),
                 request.model,
                 request.provider_url,
+                Some(endpoint),
+                checks,
                 started,
             );
         }
@@ -1413,6 +1455,12 @@ async fn test_agent_provider(request: AgentChatRequest) -> AgentProviderTestResu
 
     if !status.is_success() {
         let category = provider_error_category(status.as_u16(), &text);
+        checks.push(AgentProviderDiagnosticCheck {
+            label: "Chat completions endpoint".to_string(),
+            status: "error".to_string(),
+            detail: limit_diagnostic_text(format!("HTTP {status}: {text}")),
+            duration_ms: chat_started.elapsed().as_millis(),
+        });
         return provider_test_result(
             false,
             category,
@@ -1420,6 +1468,8 @@ async fn test_agent_provider(request: AgentChatRequest) -> AgentProviderTestResu
             Some(limit_diagnostic_text(format!("HTTP {status}: {text}"))),
             request.model,
             request.provider_url,
+            Some(endpoint),
+            checks,
             started,
         );
     }
@@ -1427,6 +1477,12 @@ async fn test_agent_provider(request: AgentChatRequest) -> AgentProviderTestResu
     let parsed: Value = match serde_json::from_str(&text) {
         Ok(parsed) => parsed,
         Err(err) => {
+            checks.push(AgentProviderDiagnosticCheck {
+                label: "Chat completions endpoint".to_string(),
+                status: "warning".to_string(),
+                detail: format!("HTTP {status}, invalid JSON response"),
+                duration_ms: chat_started.elapsed().as_millis(),
+            });
             return provider_test_result(
                 false,
                 "invalid_response",
@@ -1434,6 +1490,8 @@ async fn test_agent_provider(request: AgentChatRequest) -> AgentProviderTestResu
                 Some(limit_diagnostic_text(format!("{err}: {text}"))),
                 request.model,
                 request.provider_url,
+                Some(endpoint),
+                checks,
                 started,
             );
         }
@@ -1449,6 +1507,12 @@ async fn test_agent_provider(request: AgentChatRequest) -> AgentProviderTestResu
         .trim();
 
     if content.is_empty() {
+        checks.push(AgentProviderDiagnosticCheck {
+            label: "Chat completions endpoint".to_string(),
+            status: "warning".to_string(),
+            detail: "HTTP 200 with no assistant message content.".to_string(),
+            duration_ms: chat_started.elapsed().as_millis(),
+        });
         return provider_test_result(
             false,
             "invalid_response",
@@ -1456,9 +1520,18 @@ async fn test_agent_provider(request: AgentChatRequest) -> AgentProviderTestResu
             Some(limit_diagnostic_text(text)),
             request.model,
             request.provider_url,
+            Some(endpoint),
+            checks,
             started,
         );
     }
+
+    checks.push(AgentProviderDiagnosticCheck {
+        label: "Chat completions endpoint".to_string(),
+        status: "success".to_string(),
+        detail: format!("HTTP {status}; sample response: {content}"),
+        duration_ms: chat_started.elapsed().as_millis(),
+    });
 
     provider_test_result(
         true,
@@ -1467,6 +1540,8 @@ async fn test_agent_provider(request: AgentChatRequest) -> AgentProviderTestResu
         Some(format!("Sample response: {content}")),
         request.model,
         request.provider_url,
+        Some(endpoint),
+        checks,
         started,
     )
 }
@@ -1478,6 +1553,8 @@ fn provider_test_result(
     detail: Option<String>,
     model: String,
     provider_url: String,
+    endpoint: Option<String>,
+    checks: Vec<AgentProviderDiagnosticCheck>,
     started: Instant,
 ) -> AgentProviderTestResult {
     AgentProviderTestResult {
@@ -1487,8 +1564,66 @@ fn provider_test_result(
         detail,
         model: Some(model),
         provider_url: Some(provider_url),
+        endpoint,
         duration_ms: started.elapsed().as_millis(),
+        checks,
     }
+}
+
+async fn run_network_probe(
+    client: &reqwest::Client,
+    label: &str,
+    url: &str,
+) -> AgentProviderDiagnosticCheck {
+    let started = Instant::now();
+    let result = client.head(url).send().await;
+    match result {
+        Ok(response) => AgentProviderDiagnosticCheck {
+            label: label.to_string(),
+            status: if response.status().is_success() || response.status().is_redirection() || response.status().as_u16() == 405 {
+                "success".to_string()
+            } else {
+                "warning".to_string()
+            },
+            detail: format!("HTTP {}", response.status()),
+            duration_ms: started.elapsed().as_millis(),
+        },
+        Err(head_err) => {
+            let fallback_started = Instant::now();
+            match client.get(url).send().await {
+                Ok(response) => AgentProviderDiagnosticCheck {
+                    label: label.to_string(),
+                    status: if response.status().is_success() || response.status().is_redirection() {
+                        "success".to_string()
+                    } else {
+                        "warning".to_string()
+                    },
+                    detail: format!("HEAD failed: {head_err}; GET returned HTTP {}", response.status()),
+                    duration_ms: started.elapsed().as_millis() + fallback_started.elapsed().as_millis(),
+                },
+                Err(get_err) => AgentProviderDiagnosticCheck {
+                    label: label.to_string(),
+                    status: "error".to_string(),
+                    detail: format!("HEAD failed: {head_err}; GET failed: {get_err}"),
+                    duration_ms: started.elapsed().as_millis(),
+                },
+            }
+        }
+    }
+}
+
+fn provider_chat_endpoint(provider_url: &str) -> String {
+    if provider_url.ends_with("/v1/chat/completions")
+        || provider_url.ends_with("/chat/completions")
+        || provider_url.ends_with("/responses")
+    {
+        return provider_url.to_string();
+    }
+    let base = provider_url.trim_end_matches('/');
+    if base.ends_with("/v1") {
+        return format!("{base}/chat/completions");
+    }
+    format!("{base}/v1/chat/completions")
 }
 
 fn provider_error_category(status: u16, text: &str) -> &'static str {

@@ -1,5 +1,5 @@
 import { ActionIcon, Badge, Box, Group, Loader, Tooltip } from '@mantine/core';
-import { ChevronLeft, ChevronRight, Copy, FileUp, MessageSquareText, PanelTop, Plus, RefreshCw, SendHorizontal, Square, Wrench, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Copy, FileUp, MessageSquareText, PanelTop, Plus, RefreshCw, SendHorizontal, Sparkles, Square, Wrench, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { renderPiMarkdown } from '../lib/piMarkdown';
 import type { DeviceAliasSettings } from '../lib/settingsStore';
@@ -615,17 +615,45 @@ export function PiWebNativeChatView({
           />
         ) : null}
 
-        <div ref={paneRef} className="pi-gui-timeline-pane">
-          <div className="pi-gui-timeline">
-            {isBooting ? (
-              <div className="pi-gui-boot-card" role="status" aria-live="polite">
-                <Loader size="sm" color="teal" />
+        {isBooting ? (
+          <div className="pi-gui-boot-screen" role="status" aria-live="polite">
+            <div className="pi-gui-boot-panel">
+              <div className="pi-gui-boot-mark">
+                <Sparkles size={22} />
+              </div>
+              <div className="pi-gui-boot-copy">
+                <span>Welcome to AgSwarm</span>
+                <h2>{bootMessage}</h2>
+                <p>Ag is preparing the local runtime, session daemon, workspace context, and command stream. First launch after install can take longer.</p>
+              </div>
+              <div className="pi-gui-boot-steps">
                 <div>
-                  <strong>{bootMessage}</strong>
-                  <span>First launch can take longer while Ag prepares the local runtime.</span>
+                  <Loader size="xs" color="teal" />
+                  <span>Starting local Ag runtime</span>
+                </div>
+                <div>
+                  <Loader size="xs" color="teal" />
+                  <span>Opening workspace: {shortPath(cwd)}</span>
+                </div>
+                <div>
+                  <Loader size="xs" color="teal" />
+                  <span>Loading conversations and commands</span>
                 </div>
               </div>
-            ) : timelineItems.length ? buildTimelineRows(timelineItems).map(row => (
+              {errorText ? (
+                <div className="pi-gui-boot-error">
+                  <span>{friendlyAgSwarmError(errorText)}</span>
+                  <button type="button" onClick={() => void loadSessions({ createIfEmpty: true })}>
+                    Retry
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : (
+          <div ref={paneRef} className="pi-gui-timeline-pane">
+            <div className="pi-gui-timeline">
+              {timelineItems.length ? buildTimelineRows(timelineItems).map(row => (
               <TimelineRow
                 key={row.kind === 'single' ? row.item.id : row.id}
                 row={row}
@@ -634,19 +662,20 @@ export function PiWebNativeChatView({
                 user={userIdentity}
                 onToggleTool={(callId) => setExpandedToolId(current => current === callId ? null : callId)}
               />
-            )) : (
-              <div className="pi-gui-empty">Ask {assistantLabel} to start working in this workspace.</div>
-            )}
-            {errorText ? (
-              <div className="pi-gui-error" role="status">
-                <span>{friendlyAgSwarmError(errorText)}</span>
-                <button type="button" onClick={() => void loadSessions({ createIfEmpty: true })}>
-                  Retry
-                </button>
-              </div>
-            ) : null}
+              )) : (
+                <div className="pi-gui-empty">Ask {assistantLabel} to start working in this workspace.</div>
+              )}
+              {errorText ? (
+                <div className="pi-gui-error" role="status">
+                  <span>{friendlyAgSwarmError(errorText)}</span>
+                  <button type="button" onClick={() => void loadSessions({ createIfEmpty: true })}>
+                    Retry
+                  </button>
+                </div>
+              ) : null}
+            </div>
           </div>
-        </div>
+        )}
 
         <div className="pi-gui-composer-wrap">
           {commandPanelOpen && filteredCommands.length ? (
