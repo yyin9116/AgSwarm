@@ -1,15 +1,20 @@
 #!/usr/bin/env node
-import { fileURLToPath } from 'node:url';
-import { buildApp } from './runtime-node/node_modules/@jmfederico/pi-web/dist/server/app.js';
-import { effectivePiWebConfig } from './runtime-node/node_modules/@jmfederico/pi-web/dist/config.js';
-import { PiWebPluginService } from './runtime-node/node_modules/@jmfederico/pi-web/dist/server/piWebPluginService.js';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const runtimeRoot = process.env.PI_WEB_RUNTIME_DIR
+  ? pathToFileURL(`${process.env.PI_WEB_RUNTIME_DIR}/`)
+  : new URL('./runtime-node/', import.meta.url);
+const piWebRoot = new URL('node_modules/@jmfederico/pi-web/', runtimeRoot);
+const { buildApp } = await import(new URL('dist/server/app.js', piWebRoot));
+const { effectivePiWebConfig } = await import(new URL('dist/config.js', piWebRoot));
+const { PiWebPluginService } = await import(new URL('dist/server/piWebPluginService.js', piWebRoot));
 
 const app = await buildApp({
   clientDist: fileURLToPath(new URL('./pi-web-client/', import.meta.url)),
   piWebPlugins: new PiWebPluginService({
     roots: [
       {
-        path: fileURLToPath(new URL('./runtime-node/node_modules/@jmfederico/pi-web/dist/pi-web-plugins/', import.meta.url)),
+        path: fileURLToPath(new URL('dist/pi-web-plugins/', piWebRoot)),
         source: 'bundled',
         scope: 'bundled',
       },

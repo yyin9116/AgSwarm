@@ -8,6 +8,7 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const desktopDir = path.resolve(scriptDir, '..');
 const binariesDir = path.join(desktopDir, 'src-tauri', 'binaries');
 const runtimeDir = path.join(binariesDir, 'runtime-node');
+const runtimeArchivePath = path.join(binariesDir, 'runtime-node.zip');
 const piWebPackageDir = path.join(runtimeDir, 'node_modules', '@jmfederico', 'pi-web');
 
 const SUPPORTED_TARGETS = [
@@ -80,6 +81,7 @@ function requiredRuntimeFiles(target) {
     path.join(runtimeDir, 'package.json'),
     path.join(runtimeDir, 'package-lock.json'),
     path.join(runtimeDir, '.agswarm-runtime-target'),
+    runtimeArchivePath,
     path.join(piWebPackageDir, 'package.json'),
     path.join(piWebPackageDir, 'dist', 'server', 'index.js'),
     path.join(piWebPackageDir, 'dist', 'server', 'sessiond.js'),

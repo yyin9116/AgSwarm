@@ -13,6 +13,7 @@ const binariesDir = path.join(desktopDir, 'src-tauri', 'binaries');
 const bridgeEntry = path.join(desktopDir, 'scripts', 'pi-agent-session-bridge.mjs');
 const workDir = path.join(desktopDir, 'src-tauri', 'target', 'sidecar-work');
 const runtimeDir = path.join(binariesDir, 'runtime-node');
+const runtimeArchivePath = path.join(binariesDir, 'runtime-node.zip');
 const piWebPackageDir = path.join(runtimeDir, 'node_modules', '@jmfederico', 'pi-web');
 const piWebClientDir = path.join(binariesDir, 'pi-web-client');
 const bundledPiWebPackageDir = path.join(binariesDir, 'pi-web-package');
@@ -150,7 +151,13 @@ async function preparePiWebRuntime(target) {
   const npmArgs = existsSync(path.join(runtimeDir, 'package-lock.json'))
     ? ['ci', '--include=optional']
     : ['install', '--include=optional'];
-  run('npm', npmArgs, { cwd: runtimeDir });
+  run('npm', npmArgs, {
+    cwd: runtimeDir,
+    env: {
+      ...process.env,
+      npm_config_cache: path.join(workDir, 'npm-cache'),
+    },
+  });
 
   await access(path.join(piWebPackageDir, 'dist', 'server', 'index.js'));
   await access(path.join(piWebPackageDir, 'dist', 'server', 'sessiond.js'));
@@ -164,9 +171,27 @@ async function preparePiWebRuntime(target) {
   rmSync(bundledPiWebPackageDir, { recursive: true, force: true });
   await copyPackageForDiagnostics(piWebPackageDir, bundledPiWebPackageDir);
   await pruneRuntimeDevelopmentFiles(runtimeDir);
+  createRuntimeArchive();
 
   await writePreparedTargetMarker(target);
   console.log(`pi-web runtime ready for ${target}: ${runtimeDir}`);
+}
+
+function createRuntimeArchive() {
+  rmSync(runtimeArchivePath, { force: true });
+  if (os.platform() === 'win32') {
+    run('powershell', [
+      '-NoProfile',
+      '-Command',
+      [
+        '$ErrorActionPreference = "Stop"',
+        `Compress-Archive -LiteralPath '${runtimeDir.replaceAll("'", "''")}' -DestinationPath '${runtimeArchivePath.replaceAll("'", "''")}' -Force`,
+      ].join('; '),
+    ]);
+  } else {
+    run('zip', ['-qr', runtimeArchivePath, 'runtime-node'], { cwd: binariesDir });
+  }
+  console.log(`Archived pi-web runtime: ${runtimeArchivePath}`);
 }
 
 async function ensureNodePtyPrebuild(target) {

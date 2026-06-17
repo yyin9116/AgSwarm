@@ -1,6 +1,6 @@
 [package]
 name = "agswarm-client"
-version = "0.2.21"
+version = "0.2.22"
 description = "AgSwarm Client desktop shell"
 authors = ["AgSwarm"]
 edition = "2021"
@@ -15,3 +15,4 @@ tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+zip = { version = "4", default-features = false, features = ["deflate"] }

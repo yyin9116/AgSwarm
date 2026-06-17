@@ -15,6 +15,7 @@ dist-artifacts/
 desktop/src-tauri/binaries/node-*
 desktop/src-tauri/binaries/pi-agent-session-bridge-*
 desktop/src-tauri/binaries/runtime-node/.agswarm-runtime-target
+desktop/src-tauri/binaries/runtime-node.zip
 
 # Local tooling/runtime downloads and worktree internals.
 tools/nats-server/

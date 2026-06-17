@@ -1496,7 +1496,8 @@ impl ManagedPiWeb {
             .path()
             .resource_dir()
             .map_err(|err| format!("failed to resolve app resource dir: {err}"))?;
-        let package_dir = resolve_pi_web_package_dir(app, repo_root)?;
+        let packaged_runtime_dir = ensure_packaged_pi_web_runtime(app, repo_root, &resource_dir)?;
+        let package_dir = resolve_pi_web_package_dir(app, repo_root, packaged_runtime_dir.as_deref())?;
         let server_entry = resolve_pi_web_server_entry(app, repo_root, &resource_dir)?;
         let sessiond_entry = package_dir.join("dist").join("server").join("sessiond.js");
         if !sessiond_entry.is_file() || !server_entry.is_file() {
@@ -1522,6 +1523,7 @@ impl ManagedPiWeb {
             .arg(&sessiond_entry)
             .current_dir(repo_root)
             .env("PI_WEB_PACKAGE_DIR", &package_dir)
+            .envs(pi_web_runtime_env(packaged_runtime_dir.as_deref()))
             .env("PI_WEB_DATA_DIR", &data_dir)
             .env("PI_WEB_SESSIOND_SOCKET", &socket_path)
             .env("PI_CODING_AGENT_DIR", pi_coding_agent_dir())
@@ -1541,6 +1543,7 @@ impl ManagedPiWeb {
             .arg(&server_entry)
             .current_dir(repo_root)
             .env("PI_WEB_PACKAGE_DIR", &package_dir)
+            .envs(pi_web_runtime_env(packaged_runtime_dir.as_deref()))
             .env("PI_WEB_HOST", "127.0.0.1")
             .env("PI_WEB_PORT", "8504")
             .env("PI_WEB_DATA_DIR", &data_dir)
@@ -1895,10 +1898,14 @@ fn node_binary_names() -> Vec<String> {
 fn resolve_pi_web_package_dir(
     app: &tauri::AppHandle,
     repo_root: &Path,
+    packaged_runtime_dir: Option<&Path>,
 ) -> Result<PathBuf, String> {
     let mut candidates = Vec::new();
     if let Some(path) = env_non_empty("PI_WEB_PACKAGE_DIR") {
         candidates.push(PathBuf::from(path));
+    }
+    if let Some(runtime_dir) = packaged_runtime_dir {
+        candidates.push(runtime_dir.join("node_modules").join("@jmfederico").join("pi-web"));
     }
     #[cfg(debug_assertions)]
     {
@@ -1929,6 +1936,9 @@ fn resolve_pi_web_package_dir(
         candidates.push(resource_dir.join("node_modules").join("@jmfederico").join("pi-web"));
         candidates.push(resource_dir.join("pi-web"));
         candidates.push(resource_dir.join("binaries").join("pi-web"));
+    }
+    if let Some(runtime_dir) = packaged_pi_web_runtime_dir(app) {
+        candidates.push(runtime_dir.join("node_modules").join("@jmfederico").join("pi-web"));
     }
     if let Ok(current_exe) = std::env::current_exe() {
         if let Some(exe_dir) = current_exe.parent() {
@@ -2000,7 +2010,7 @@ fn resolve_pi_web_package_dir(
             return Ok(candidate);
         }
     }
-    Err("pi-web package was not found; install @jmfederico/pi-web or set PI_WEB_PACKAGE_DIR.".to_string())
+    Err("Ag runtime package was not found. Restart the app or reinstall AgSwarm Client.".to_string())
 }
 
 fn resolve_pi_web_server_entry(
@@ -2037,10 +2047,141 @@ fn resolve_pi_web_server_entry(
             return Ok(candidate);
         }
     }
-    Ok(resolve_pi_web_package_dir(app, repo_root)?
+    Ok(resolve_pi_web_package_dir(app, repo_root, None)?
         .join("dist")
         .join("server")
         .join("index.js"))
+}
+
+fn pi_web_runtime_env(runtime_dir: Option<&Path>) -> Vec<(&'static str, String)> {
+    runtime_dir
+        .map(|path| vec![("PI_WEB_RUNTIME_DIR", path.to_string_lossy().to_string())])
+        .unwrap_or_default()
+}
+
+fn packaged_pi_web_runtime_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
+    app.path()
+        .app_data_dir()
+        .ok()
+        .map(|dir| dir.join("runtime").join("runtime-node"))
+}
+
+fn ensure_packaged_pi_web_runtime(
+    app: &tauri::AppHandle,
+    repo_root: &Path,
+    resource_dir: &Path,
+) -> Result<Option<PathBuf>, String> {
+    let archive = packaged_pi_web_runtime_archive(app, repo_root, resource_dir);
+    let Some(archive) = archive else {
+        return Ok(None);
+    };
+    let Some(runtime_dir) = packaged_pi_web_runtime_dir(app) else {
+        return Ok(None);
+    };
+    let package_dir = runtime_dir
+        .join("node_modules")
+        .join("@jmfederico")
+        .join("pi-web");
+    let expected_stamp = runtime_archive_stamp(&archive)?;
+    let stamp_path = runtime_dir.join(".agswarm-runtime-archive-stamp");
+    if package_dir.join("dist").join("server").join("sessiond.js").is_file()
+        && package_dir.join("dist").join("server").join("app.js").is_file()
+        && fs::read_to_string(&stamp_path)
+            .map(|value| value == expected_stamp)
+            .unwrap_or(false)
+    {
+        return Ok(Some(runtime_dir));
+    }
+
+    let runtime_root = runtime_dir
+        .parent()
+        .ok_or_else(|| "failed to resolve Ag runtime extraction root".to_string())?
+        .to_path_buf();
+    if runtime_root.exists() {
+        fs::remove_dir_all(&runtime_root)
+            .map_err(|err| format!("failed to reset bundled Ag runtime: {err}"))?;
+    }
+    fs::create_dir_all(&runtime_root)
+        .map_err(|err| format!("failed to create bundled Ag runtime dir: {err}"))?;
+    unzip_archive(&archive, &runtime_root)?;
+
+    if !package_dir.join("dist").join("server").join("sessiond.js").is_file() {
+        return Err("bundled Ag runtime archive did not contain a usable runtime.".to_string());
+    }
+    fs::write(&stamp_path, expected_stamp)
+        .map_err(|err| format!("failed to write bundled Ag runtime stamp: {err}"))?;
+    Ok(Some(runtime_dir))
+}
+
+fn runtime_archive_stamp(archive: &Path) -> Result<String, String> {
+    let metadata = fs::metadata(archive)
+        .map_err(|err| format!("failed to read bundled Ag runtime archive metadata: {err}"))?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    Ok(format!("{}:{modified}", metadata.len()))
+}
+
+fn packaged_pi_web_runtime_archive(
+    app: &tauri::AppHandle,
+    repo_root: &Path,
+    resource_dir: &Path,
+) -> Option<PathBuf> {
+    let mut candidates = vec![
+        resource_dir.join("binaries").join("runtime-node.zip"),
+        resource_dir.join("runtime-node.zip"),
+        repo_root
+            .join("desktop")
+            .join("src-tauri")
+            .join("binaries")
+            .join("runtime-node.zip"),
+    ];
+    if let Ok(app_resource_dir) = app.path().resource_dir() {
+        candidates.push(app_resource_dir.join("binaries").join("runtime-node.zip"));
+        candidates.push(app_resource_dir.join("runtime-node.zip"));
+    }
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(exe_dir) = current_exe.parent() {
+            candidates.push(exe_dir.join("binaries").join("runtime-node.zip"));
+            if let Some(contents_dir) = exe_dir.parent() {
+                candidates.push(contents_dir.join("Resources").join("binaries").join("runtime-node.zip"));
+            }
+        }
+    }
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+fn unzip_archive(archive: &Path, destination: &Path) -> Result<(), String> {
+    let file = fs::File::open(archive)
+        .map_err(|err| format!("failed to open bundled Ag runtime archive: {err}"))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|err| format!("failed to read bundled Ag runtime archive: {err}"))?;
+    for index in 0..archive.len() {
+        let mut file = archive
+            .by_index(index)
+            .map_err(|err| format!("failed to read bundled Ag runtime entry: {err}"))?;
+        let Some(enclosed_name) = file.enclosed_name() else {
+            continue;
+        };
+        let outpath = destination.join(enclosed_name);
+        if file.is_dir() {
+            fs::create_dir_all(&outpath)
+                .map_err(|err| format!("failed to create bundled Ag runtime dir: {err}"))?;
+            continue;
+        }
+        if let Some(parent) = outpath.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|err| format!("failed to create bundled Ag runtime parent: {err}"))?;
+        }
+        let mut outfile = fs::File::create(&outpath)
+            .map_err(|err| format!("failed to write bundled Ag runtime file: {err}"))?;
+        std::io::copy(&mut file, &mut outfile)
+            .map_err(|err| format!("failed to extract bundled Ag runtime file: {err}"))?;
+    }
+    Ok(())
 }
 
 fn pi_coding_agent_dir() -> String {
