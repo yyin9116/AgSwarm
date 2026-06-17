@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { accessSync, constants } from 'node:fs';
+import { accessSync, constants, readFileSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -73,6 +73,32 @@ function checkPiWebRuntime(target) {
         filePath,
       });
     }
+  }
+  checkRuntimeArchiveIsZip(target);
+}
+
+function checkRuntimeArchiveIsZip(target) {
+  try {
+    const metadata = statSync(runtimeArchivePath);
+    if (metadata.size < 22) {
+      throw new Error(`archive is too small (${metadata.size} bytes)`);
+    }
+    const tailLength = Math.min(metadata.size, 66_000);
+    const file = readFileSync(runtimeArchivePath);
+    const tail = file.subarray(file.length - tailLength);
+    const eocdSignature = Buffer.from([0x50, 0x4b, 0x05, 0x06]);
+    if (tail.lastIndexOf(eocdSignature) === -1) {
+      throw new Error('archive is missing ZIP end-of-central-directory signature');
+    }
+    if (file.subarray(0, 2).toString('binary') !== 'PK') {
+      throw new Error('archive does not start with a ZIP local/header signature');
+    }
+  } catch (error) {
+    missing.push({
+      target,
+      fileName: 'runtime-node.zip',
+      filePath: `${runtimeArchivePath} (${error instanceof Error ? error.message : String(error)})`,
+    });
   }
 }
 

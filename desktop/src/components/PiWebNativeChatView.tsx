@@ -411,7 +411,7 @@ export function PiWebNativeChatView({
 
   const submit = useCallback(async () => {
     const text = composerText.trim();
-    if ((!text && !attachments.length) || !selectedSession || selectedSession.archived || isSubmitting) return;
+    if ((!text && !attachments.length) || selectedSession?.archived || isSubmitting) return;
     const submittedAttachments = attachments;
     const visibleText = text || attachmentOnlyPrompt(submittedAttachments);
     setComposerText('');
@@ -421,6 +421,14 @@ export function PiWebNativeChatView({
     setIsSubmitting(true);
     setTimelineItems(items => [...items, userTimelineMessage(withAttachmentSummary(visibleText, submittedAttachments))]);
     try {
+      let session = selectedSession;
+      if (!session) {
+        await ensurePiWebReady();
+        const created = await startPiWebSession(cwd);
+        setSessions(current => [created, ...current.filter(item => item.id !== created.id)]);
+        setSelectedSessionId(created.id);
+        session = created;
+      }
       const promptText = withAttachmentPrompt(visibleText, submittedAttachments);
       const prompt = withAgSwarmRuntimeContext(promptText, {
         devices,
@@ -430,7 +438,7 @@ export function PiWebNativeChatView({
       });
       const skillPrompt = agswarmSkillCommandPrompt(visibleText);
       if (skillPrompt) {
-        await sendPiWebPrompt(selectedSession, withAgSwarmRuntimeContext(skillPrompt, {
+        await sendPiWebPrompt(session, withAgSwarmRuntimeContext(skillPrompt, {
           devices,
           deviceStatusMessage,
           localNodeId,
@@ -438,13 +446,13 @@ export function PiWebNativeChatView({
         }));
         setIsAwaitingAgent(true);
       } else if (visibleText.startsWith('/')) {
-        const result = await runPiWebCommand(selectedSession, visibleText);
+        const result = await runPiWebCommand(session, visibleText);
         applyCommandResultToTimeline(result);
       } else {
-        await sendPiWebPrompt(selectedSession, prompt);
+        await sendPiWebPrompt(session, prompt);
         setIsAwaitingAgent(true);
       }
-      setSessions(current => promoteSession(current, selectedSession.id));
+      setSessions(current => promoteSession(current, session.id));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setErrorText(message);
@@ -453,7 +461,7 @@ export function PiWebNativeChatView({
       setIsSubmitting(false);
       window.setTimeout(() => composerRef.current?.focus(), 80);
     }
-  }, [applyCommandResultToTimeline, attachments, composerText, deviceStatusMessage, devices, displayDeviceLabel, isSubmitting, localNodeId, selectedSession]);
+  }, [applyCommandResultToTimeline, attachments, composerText, cwd, deviceStatusMessage, devices, displayDeviceLabel, isSubmitting, localNodeId, selectedSession]);
 
   const isRunning = Boolean(status?.isStreaming || status?.isCompacting || status?.isBashRunning || isSubmitting || isAwaitingAgent);
   const canStop = Boolean(selectedSession && !selectedSession.archived && (
@@ -617,7 +625,14 @@ export function PiWebNativeChatView({
             )) : (
               <div className="pi-gui-empty">Ask {assistantLabel} to start working in this workspace.</div>
             )}
-            {errorText ? <div className="pi-gui-error">{friendlyAgSwarmError(errorText)}</div> : null}
+            {errorText ? (
+              <div className="pi-gui-error" role="status">
+                <span>{friendlyAgSwarmError(errorText)}</span>
+                <button type="button" onClick={() => void loadSessions({ createIfEmpty: true })}>
+                  Retry
+                </button>
+              </div>
+            ) : null}
           </div>
         </div>
 
@@ -681,8 +696,8 @@ export function PiWebNativeChatView({
               ref={composerRef}
               value={composerText}
               rows={1}
-              placeholder={selectedSession ? `Ask ${assistantLabel} in ${shortPath(cwd)}...` : `Starting ${assistantLabel}...`}
-              disabled={!selectedSession || selectedSession.archived}
+              placeholder={selectedSession ? `Ask ${assistantLabel} in ${shortPath(cwd)}...` : `Ask ${assistantLabel} in ${shortPath(cwd)}...`}
+              disabled={Boolean(selectedSession?.archived)}
               onChange={(event) => {
                 const value = event.currentTarget.value;
                 setComposerText(value);
@@ -700,7 +715,7 @@ export function PiWebNativeChatView({
               color={canStop ? 'gray' : 'teal'}
               radius="xl"
               aria-label={canStop ? 'Stop' : 'Send'}
-              disabled={!canStop && ((!composerText.trim() && !attachments.length) || !selectedSession)}
+              disabled={!canStop && ((!composerText.trim() && !attachments.length) || Boolean(selectedSession?.archived))}
               onClick={() => {
                 if (canStop) void stopActiveWork();
                 else void submit();

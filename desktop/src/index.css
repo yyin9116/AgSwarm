@@ -938,6 +938,31 @@ html[data-mantine-color-scheme="dark"] {
     color: #b91c1c;
   }
 
+  .pi-gui-error {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    max-width: min(44rem, 100%);
+    border: 1px solid color-mix(in srgb, #ef4444 28%, transparent);
+    border-radius: 0.75rem;
+    background: color-mix(in srgb, #fee2e2 58%, var(--agswarm-surface));
+    padding: 0.55rem 0.7rem;
+    font-size: 0.76rem;
+    line-height: 1.35;
+  }
+
+  .pi-gui-error button {
+    flex: 0 0 auto;
+    border: 0;
+    border-radius: 999px;
+    background: color-mix(in srgb, #ef4444 12%, var(--agswarm-surface-elevated));
+    color: #991b1b;
+    cursor: pointer;
+    font: inherit;
+    font-weight: 600;
+    padding: 0.28rem 0.6rem;
+  }
+
   .pi-gui-tool-detail {
     max-height: 13rem;
     overflow: auto;

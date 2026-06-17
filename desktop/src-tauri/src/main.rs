@@ -197,10 +197,85 @@ struct ManagedPiWeb {
     server: Option<Child>,
     sessiond: Option<Child>,
     port: Option<u16>,
+    sessiond_port: Option<u16>,
     data_dir: Option<PathBuf>,
     last_message: String,
     last_server_exit_code: Option<i32>,
     last_sessiond_exit_code: Option<i32>,
+}
+
+enum PiWebSessiondEndpoint {
+    Http { host: &'static str, port: u16, url: String },
+    Socket { path: PathBuf },
+}
+
+enum PiWebProcessRole {
+    Sessiond,
+    Web,
+}
+
+impl PiWebSessiondEndpoint {
+    fn new(data_dir: &Path) -> Result<Self, String> {
+        if cfg!(windows) {
+            let port = reserve_loopback_port()
+                .map_err(|err| format!("failed to reserve Ag runtime session port: {err}"))?;
+            let host = "127.0.0.1";
+            return Ok(Self::Http {
+                host,
+                port,
+                url: format!("http://{host}:{port}"),
+            });
+        }
+        Ok(Self::Socket {
+            path: data_dir.join("sessiond.sock"),
+        })
+    }
+
+    fn port(&self) -> Option<u16> {
+        match self {
+            Self::Http { port, .. } => Some(*port),
+            Self::Socket { .. } => None,
+        }
+    }
+}
+
+fn reserve_loopback_port() -> std::io::Result<u16> {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    Ok(listener.local_addr()?.port())
+}
+
+trait PiWebSessiondEndpointCommandExt {
+    fn with_pi_web_sessiond_endpoint(
+        &mut self,
+        endpoint: &PiWebSessiondEndpoint,
+        role: PiWebProcessRole,
+    ) -> &mut Self;
+}
+
+impl PiWebSessiondEndpointCommandExt for Command {
+    fn with_pi_web_sessiond_endpoint(
+        &mut self,
+        endpoint: &PiWebSessiondEndpoint,
+        role: PiWebProcessRole,
+    ) -> &mut Self {
+        match endpoint {
+            PiWebSessiondEndpoint::Http { host, port, url } => {
+                match role {
+                    PiWebProcessRole::Sessiond => {
+                        self.env("PI_WEB_SESSIOND_HOST", host)
+                            .env("PI_WEB_SESSIOND_PORT", port.to_string());
+                    }
+                    PiWebProcessRole::Web => {
+                        self.env("PI_WEB_SESSIOND_URL", url);
+                    }
+                }
+            }
+            PiWebSessiondEndpoint::Socket { path } => {
+                self.env("PI_WEB_SESSIOND_SOCKET", path);
+            }
+        }
+        self
+    }
 }
 
 impl Drop for PeerManager {
@@ -1521,6 +1596,8 @@ impl ManagedPiWeb {
             wait_for_tcp_port_closed("127.0.0.1:8504", Duration::from_secs(2))?;
         }
         if self.server_running() && self.sessiond_running() {
+            wait_for_pi_web_runtime("127.0.0.1:8504", Duration::from_secs(30))?;
+            self.last_message = "Ag runtime is ready on 127.0.0.1:8504.".to_string();
             return Ok(());
         }
 
@@ -1553,7 +1630,7 @@ impl ManagedPiWeb {
         let data_dir = app_data_dir.join("pi-web");
         fs::create_dir_all(&data_dir)
             .map_err(|err| format!("failed to create pi-web data dir: {err}"))?;
-        let socket_path = data_dir.join("sessiond.sock");
+        let sessiond_endpoint = PiWebSessiondEndpoint::new(&data_dir)?;
 
         let sessiond_stdout = fs::File::create(log_dir.join("pi-web-sessiond.out.log"))
             .map_err(|err| format!("failed to create pi-web sessiond stdout log: {err}"))?;
@@ -1565,14 +1642,15 @@ impl ManagedPiWeb {
             .env("PI_WEB_PACKAGE_DIR", &package_dir)
             .envs(pi_web_runtime_env(packaged_runtime_dir.as_deref()))
             .env("PI_WEB_DATA_DIR", &data_dir)
-            .env("PI_WEB_SESSIOND_SOCKET", &socket_path)
             .env("PI_CODING_AGENT_DIR", pi_coding_agent_dir())
             .env("PI_CODING_AGENT_SESSION_DIR", data_dir.join("sessions"))
             .stdout(Stdio::from(sessiond_stdout))
             .stderr(Stdio::from(sessiond_stderr))
+            .with_pi_web_sessiond_endpoint(&sessiond_endpoint, PiWebProcessRole::Sessiond)
             .spawn_with_path()
             .map_err(|err| format!("failed to start pi-web session daemon with {node}: {err}"))?;
         self.sessiond = Some(sessiond);
+        self.sessiond_port = sessiond_endpoint.port();
         self.last_sessiond_exit_code = None;
 
         let server_stdout = fs::File::create(log_dir.join("pi-web-server.out.log"))
@@ -1587,11 +1665,11 @@ impl ManagedPiWeb {
             .env("PI_WEB_HOST", "127.0.0.1")
             .env("PI_WEB_PORT", "8504")
             .env("PI_WEB_DATA_DIR", &data_dir)
-            .env("PI_WEB_SESSIOND_SOCKET", &socket_path)
             .env("PI_CODING_AGENT_DIR", pi_coding_agent_dir())
             .env("PI_CODING_AGENT_SESSION_DIR", data_dir.join("sessions"))
             .stdout(Stdio::from(server_stdout))
             .stderr(Stdio::from(server_stderr))
+            .with_pi_web_sessiond_endpoint(&sessiond_endpoint, PiWebProcessRole::Web)
             .spawn_with_path()
             .map_err(|err| format!("failed to start pi-web server with {node}: {err}"))?;
         self.server = Some(server);
@@ -1599,7 +1677,7 @@ impl ManagedPiWeb {
         self.data_dir = Some(data_dir);
         self.last_server_exit_code = None;
 
-        wait_for_pi_web_runtime("127.0.0.1:8504", Duration::from_secs(8))?;
+        wait_for_pi_web_runtime("127.0.0.1:8504", Duration::from_secs(30))?;
         self.last_message = format!(
             "Started Ag runtime on 127.0.0.1:8504 with workspace {}.",
             workspace_dir.to_string_lossy()
@@ -2209,6 +2287,7 @@ fn packaged_pi_web_runtime_archive(
 }
 
 fn unzip_archive(archive: &Path, destination: &Path) -> Result<(), String> {
+    validate_zip_archive(archive)?;
     let file = fs::File::open(archive)
         .map_err(|err| format!("failed to open bundled Ag runtime archive: {err}"))?;
     let mut archive = zip::ZipArchive::new(file)
@@ -2234,6 +2313,24 @@ fn unzip_archive(archive: &Path, destination: &Path) -> Result<(), String> {
             .map_err(|err| format!("failed to write bundled Ag runtime file: {err}"))?;
         std::io::copy(&mut file, &mut outfile)
             .map_err(|err| format!("failed to extract bundled Ag runtime file: {err}"))?;
+    }
+    Ok(())
+}
+
+fn validate_zip_archive(archive: &Path) -> Result<(), String> {
+    let bytes = fs::read(archive)
+        .map_err(|err| format!("failed to read bundled Ag runtime archive: {err}"))?;
+    if bytes.len() < 22
+        || !bytes.starts_with(b"PK")
+        || !bytes
+            .windows(4)
+            .rev()
+            .any(|window| window == [0x50, 0x4b, 0x05, 0x06])
+    {
+        return Err(format!(
+            "bundled Ag runtime archive is invalid at {}; reinstall AgSwarm Client with a fresh installer.",
+            archive.to_string_lossy()
+        ));
     }
     Ok(())
 }
