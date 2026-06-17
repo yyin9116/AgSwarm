@@ -168,6 +168,7 @@ struct RuntimeConfig {
     device_label: Option<String>,
     nats_url: Option<String>,
     repo_root: Option<String>,
+    default_workspace: Option<String>,
 }
 
 #[derive(Default)]
@@ -225,8 +226,7 @@ fn frontend_debug_log(request: FrontendDebugLogRequest) -> Result<(), String> {
 }
 
 fn append_frontend_debug_log(label: &str, payload: Value) -> Result<(), String> {
-    let repo_root = repo_root()?;
-    let log_dir = repo_root.join("tmp").join("tauri-peer");
+    let log_dir = frontend_debug_log_dir();
     fs::create_dir_all(&log_dir)
         .map_err(|err| format!("failed to create frontend debug log dir: {err}"))?;
     let log_path = log_dir.join("frontend-debug.log");
@@ -246,6 +246,22 @@ fn append_frontend_debug_log(label: &str, payload: Value) -> Result<(), String> 
     writeln!(file, "{serialized}")
         .map_err(|err| format!("failed to write frontend debug log: {err}"))?;
     Ok(())
+}
+
+fn frontend_debug_log_dir() -> PathBuf {
+    if let Some(value) = env_non_empty("AGSWARM_LOG_DIR") {
+        return PathBuf::from(value);
+    }
+    if let Ok(value) = std::env::var("LOCALAPPDATA") {
+        return PathBuf::from(value).join("AgSwarm Client").join("logs");
+    }
+    if let Ok(value) = std::env::var("APPDATA") {
+        return PathBuf::from(value).join("AgSwarm Client").join("logs");
+    }
+    if let Ok(value) = std::env::var("HOME") {
+        return PathBuf::from(value).join(".agswarm-client").join("logs");
+    }
+    std::env::temp_dir().join("agswarm-client").join("logs")
 }
 
 #[tauri::command]
@@ -409,24 +425,25 @@ async fn agswarm_cli(window: Window, request: CliRequest) -> Result<CliResponse,
         } else if request.stream_token.is_some() {
             run_agswarm_cli_streaming(window, request)
         } else {
-            run_agswarm_cli_blocking(request)
+            run_agswarm_cli_blocking(window.app_handle().clone(), request)
         }
     })
         .await
         .map_err(|err| format!("failed to join AgSwarm CLI task: {err}"))?
 }
 
-fn run_agswarm_cli_blocking(request: CliRequest) -> Result<CliResponse, String> {
+fn run_agswarm_cli_blocking(app: tauri::AppHandle, request: CliRequest) -> Result<CliResponse, String> {
     let repo_root = repo_root()?;
     if request.command == "pi-commands" {
-        return run_pi_agent_commands_bridge(&repo_root, &request);
+        return run_pi_agent_commands_bridge(&app, &repo_root, &request);
     }
+    let command_cwd = default_workspace_dir(&app).unwrap_or_else(|_| repo_root.clone());
     let python = python_path(&repo_root);
     let argv = build_agswarm_cli_argv(&repo_root, request, false)?;
 
     let mut cmd = Command::new(&python);
     cmd.args(&argv)
-        .current_dir(&repo_root)
+        .current_dir(&command_cwd)
         .env("PYTHONPATH", repo_root.join("src"));
     configure_child_env(&mut cmd);
     let output = cmd
@@ -449,16 +466,18 @@ fn run_agswarm_cli_blocking(request: CliRequest) -> Result<CliResponse, String> 
     })
 }
 
-fn run_pi_agent_commands_bridge(repo_root: &Path, request: &CliRequest) -> Result<CliResponse, String> {
+fn run_pi_agent_commands_bridge(app: &tauri::AppHandle, repo_root: &Path, request: &CliRequest) -> Result<CliResponse, String> {
     let bridge_command = resolve_pi_agent_session_bridge_without_window(repo_root)?;
+    let workspace = request
+        .workspace
+        .clone()
+        .or_else(|| env_non_empty("AGSWARM_PI_CWD"))
+        .or_else(|| default_workspace_dir(app).ok().map(|path| path.to_string_lossy().to_string()))
+        .unwrap_or_else(|| repo_root.to_string_lossy().to_string());
     let mut argv = vec![
         "--list-commands".to_string(),
         "--cwd".to_string(),
-        request
-            .workspace
-            .clone()
-            .or_else(|| env_non_empty("AGSWARM_PI_CWD"))
-            .unwrap_or_else(|| repo_root.to_string_lossy().to_string()),
+        workspace.clone(),
     ];
     if let Some(skills) = request.skills.clone().filter(|value| !value.trim().is_empty()) {
         argv.push("--skills".to_string());
@@ -469,7 +488,7 @@ fn run_pi_agent_commands_bridge(repo_root: &Path, request: &CliRequest) -> Resul
         cmd.env("PI_PACKAGE_DIR", package_dir);
     }
     cmd.args(&argv)
-        .current_dir(repo_root)
+        .current_dir(&workspace)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     configure_child_env(&mut cmd);
@@ -498,6 +517,7 @@ fn run_agswarm_cli_streaming(window: Window, request: CliRequest) -> Result<CliR
     if request.command == "submit-pi" {
         return run_pi_agent_session_bridge(window, &repo_root, &request);
     }
+    let command_cwd = default_workspace_dir(window.app_handle()).unwrap_or_else(|_| repo_root.clone());
     let python = python_path(&repo_root);
     let stream_token = request
         .stream_token
@@ -516,7 +536,7 @@ fn run_agswarm_cli_streaming(window: Window, request: CliRequest) -> Result<CliR
 
     let mut cmd = Command::new(&python);
     cmd.args(&argv)
-        .current_dir(&repo_root)
+        .current_dir(&command_cwd)
         .env("PYTHONPATH", repo_root.join("src"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -627,13 +647,14 @@ fn run_pi_agent_session_bridge(
         .workspace
         .clone()
         .or_else(|| env_non_empty("AGSWARM_PI_CWD"))
+        .or_else(|| default_workspace_dir(window.app_handle()).ok().map(|path| path.to_string_lossy().to_string()))
         .unwrap_or_else(|| repo_root.to_string_lossy().to_string());
     let prompt = agswarm_ai_prompt_context(repo_root, &workspace, request.prompt.clone().unwrap_or_default());
     let mut argv = vec![
         "--prompt".to_string(),
         prompt,
         "--cwd".to_string(),
-        workspace,
+        workspace.clone(),
         "--timeout-ms".to_string(),
         request.timeout_ms.unwrap_or(120_000).max(100).to_string(),
         "--task-id".to_string(),
@@ -662,7 +683,7 @@ fn run_pi_agent_session_bridge(
         cmd.env("PI_PACKAGE_DIR", package_dir);
     }
     cmd.args(&argv)
-        .current_dir(repo_root)
+        .current_dir(&workspace)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     configure_child_env(&mut cmd);
@@ -1101,6 +1122,7 @@ fn build_agswarm_cli_argv(repo_root: &Path, request: CliRequest, stream_events: 
 
 #[tauri::command]
 fn start_local_peer(
+    app: tauri::AppHandle,
     request: LocalPeerRequest,
     manager: tauri::State<'_, PeerManager>,
 ) -> Result<LocalPeerStatus, String> {
@@ -1113,9 +1135,9 @@ fn start_local_peer(
 
     inner.reap_finished();
     if request.start_nats.unwrap_or(true) && is_loopback_nats(&request.nats_url) {
-        inner.ensure_nats(&repo_root)?;
+        inner.ensure_nats(&app, &repo_root)?;
     }
-    inner.ensure_node(&repo_root, &python, request)?;
+    inner.ensure_node(&app, &repo_root, &python, request)?;
     Ok(inner.status())
 }
 
@@ -1165,12 +1187,15 @@ fn pi_web_status(manager: tauri::State<'_, PiWebManager>) -> Result<PiWebStatus,
 }
 
 #[tauri::command]
-fn runtime_config() -> RuntimeConfig {
+fn runtime_config(app: tauri::AppHandle) -> RuntimeConfig {
     RuntimeConfig {
         node_id: env_non_empty("AGSWARM_NODE_ID"),
         device_label: env_non_empty("AGSWARM_DEVICE_LABEL"),
         nats_url: env_non_empty("AGSWARM_NATS_URL"),
         repo_root: repo_root().ok().map(|path| path.to_string_lossy().to_string()),
+        default_workspace: default_workspace_dir(&app)
+            .ok()
+            .map(|path| path.to_string_lossy().to_string()),
     }
 }
 
@@ -1304,7 +1329,7 @@ fn desktop_agent_tool(
 }
 
 impl ManagedPeer {
-    fn ensure_nats(&mut self, repo_root: &Path) -> Result<(), String> {
+    fn ensure_nats(&mut self, app: &tauri::AppHandle, repo_root: &Path) -> Result<(), String> {
         if tcp_port_open("127.0.0.1:4222") {
             self.last_message = "Using existing local NATS server.".to_string();
             return Ok(());
@@ -1322,7 +1347,11 @@ impl ManagedPeer {
                     .to_string();
             return Ok(());
         };
-        let log_dir = repo_root.join("tmp").join("tauri-peer");
+        let app_data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|err| format!("failed to resolve AgSwarm app data dir: {err}"))?;
+        let log_dir = app_data_dir.join("logs").join("tauri-peer");
         std::fs::create_dir_all(&log_dir)
             .map_err(|err| format!("failed to create local peer log dir: {err}"))?;
         let stdout = std::fs::File::create(log_dir.join("nats.out.log"))
@@ -1333,7 +1362,7 @@ impl ManagedPeer {
         command
             .arg("-c")
             .arg(repo_root.join("configs").join("nats-dev.conf"))
-            .current_dir(repo_root)
+            .current_dir(&app_data_dir)
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
         let child = command
@@ -1347,6 +1376,7 @@ impl ManagedPeer {
 
     fn ensure_node(
         &mut self,
+        app: &tauri::AppHandle,
         repo_root: &Path,
         python: &str,
         request: LocalPeerRequest,
@@ -1369,7 +1399,12 @@ impl ManagedPeer {
         self.stop_node();
         stop_stale_node_processes(repo_root, requested_node_id);
 
-        let log_dir = repo_root.join("tmp").join("tauri-peer");
+        let app_data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|err| format!("failed to resolve AgSwarm app data dir: {err}"))?;
+        let workspace_dir = default_workspace_dir(app).unwrap_or_else(|_| app_data_dir.clone());
+        let log_dir = app_data_dir.join("logs").join("tauri-peer");
         std::fs::create_dir_all(&log_dir)
             .map_err(|err| format!("failed to create local peer log dir: {err}"))?;
         let stdout = std::fs::File::create(log_dir.join(format!("{requested_node_id}.out.log")))
@@ -1411,7 +1446,7 @@ impl ManagedPeer {
 
         let child = Command::new(python)
             .args(&argv)
-            .current_dir(repo_root)
+            .current_dir(&workspace_dir)
             .env("PYTHONPATH", repo_root.join("src"))
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr))
@@ -1490,6 +1525,11 @@ impl ManagedPiWeb {
         }
 
         self.stop();
+        let app_data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|err| format!("failed to resolve AgSwarm app data dir: {err}"))?;
+        let workspace_dir = default_workspace_dir(app)?;
         let node = find_node_runtime(app, repo_root)
             .ok_or_else(|| "node runtime was not found; install Node.js >=22 or bundle a Node sidecar before starting pi-web.".to_string())?;
         let resource_dir = app
@@ -1507,10 +1547,10 @@ impl ManagedPiWeb {
             ));
         }
 
-        let log_dir = repo_root.join("tmp").join("tauri-peer");
+        let log_dir = app_data_dir.join("logs").join("tauri-peer");
         fs::create_dir_all(&log_dir)
             .map_err(|err| format!("failed to create pi-web log dir: {err}"))?;
-        let data_dir = repo_root.join("tmp").join("pi-web");
+        let data_dir = app_data_dir.join("pi-web");
         fs::create_dir_all(&data_dir)
             .map_err(|err| format!("failed to create pi-web data dir: {err}"))?;
         let socket_path = data_dir.join("sessiond.sock");
@@ -1521,7 +1561,7 @@ impl ManagedPiWeb {
             .map_err(|err| format!("failed to create pi-web sessiond stderr log: {err}"))?;
         let sessiond = Command::new(&node)
             .arg(&sessiond_entry)
-            .current_dir(repo_root)
+            .current_dir(&workspace_dir)
             .env("PI_WEB_PACKAGE_DIR", &package_dir)
             .envs(pi_web_runtime_env(packaged_runtime_dir.as_deref()))
             .env("PI_WEB_DATA_DIR", &data_dir)
@@ -1541,7 +1581,7 @@ impl ManagedPiWeb {
             .map_err(|err| format!("failed to create pi-web server stderr log: {err}"))?;
         let server = Command::new(&node)
             .arg(&server_entry)
-            .current_dir(repo_root)
+            .current_dir(&workspace_dir)
             .env("PI_WEB_PACKAGE_DIR", &package_dir)
             .envs(pi_web_runtime_env(packaged_runtime_dir.as_deref()))
             .env("PI_WEB_HOST", "127.0.0.1")
@@ -1560,7 +1600,10 @@ impl ManagedPiWeb {
         self.last_server_exit_code = None;
 
         wait_for_pi_web_runtime("127.0.0.1:8504", Duration::from_secs(8))?;
-        self.last_message = "Started pi-web on 127.0.0.1:8504.".to_string();
+        self.last_message = format!(
+            "Started Ag runtime on 127.0.0.1:8504 with workspace {}.",
+            workspace_dir.to_string_lossy()
+        );
         Ok(())
     }
 
@@ -1665,13 +1708,13 @@ struct LatexSource {
     main_tex: Option<String>,
 }
 
-fn resolve_latex_source(repo_root: &Path, request: &CliRequest) -> Result<LatexSource, String> {
+fn resolve_latex_source(_repo_root: &Path, request: &CliRequest) -> Result<LatexSource, String> {
     if request
         .source_text
         .as_ref()
         .is_some_and(|value| !value.trim().is_empty())
     {
-        let dir = repo_root.join("tmp").join("tauri-latex");
+        let dir = std::env::temp_dir().join("agswarm-client").join("tauri-latex");
         std::fs::create_dir_all(&dir)
             .map_err(|err| format!("failed to create temporary LaTeX workspace: {err}"))?;
         let stamp = SystemTime::now()
@@ -1702,6 +1745,17 @@ fn repo_root() -> Result<PathBuf, String> {
         .and_then(Path::parent)
         .map(Path::to_path_buf)
         .ok_or_else(|| "failed to resolve repository root".to_string())
+}
+
+fn default_workspace_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let base = app
+        .path()
+        .home_dir()
+        .map_err(|err| format!("failed to resolve home directory for AgSwarm workspace: {err}"))?;
+    let dir = base.join("AgSwarm");
+    fs::create_dir_all(&dir)
+        .map_err(|err| format!("failed to create default AgSwarm workspace: {err}"))?;
+    Ok(dir)
 }
 
 fn python_path(repo_root: &Path) -> String {
@@ -2220,7 +2274,7 @@ fn wait_for_pi_web_runtime(addr: &str, timeout: Duration) -> Result<(), String> 
         std::thread::sleep(Duration::from_millis(160));
     }
     Err(format!(
-        "pi-web runtime did not become healthy at {addr}; check tmp/tauri-peer/pi-web-server.err.log and pi-web-sessiond.err.log."
+        "Ag runtime did not become healthy at {addr}; check the app data logs for pi-web-server.err.log and pi-web-sessiond.err.log."
     ))
 }
 
@@ -2359,8 +2413,8 @@ fn normalize_path(path: &Path) -> PathBuf {
     normalized
 }
 
-fn write_temp_python_script(repo_root: &Path, script: &str) -> Result<PathBuf, String> {
-    let dir = repo_root.join("tmp").join("desktop-agent");
+fn write_temp_python_script(_repo_root: &Path, script: &str) -> Result<PathBuf, String> {
+    let dir = std::env::temp_dir().join("agswarm-client").join("desktop-agent");
     fs::create_dir_all(&dir)
         .map_err(|err| format!("failed to create desktop agent temp dir: {err}"))?;
     let stamp = SystemTime::now()

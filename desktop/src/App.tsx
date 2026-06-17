@@ -210,7 +210,10 @@ export default function App() {
   const [isRefreshingDevices, setIsRefreshingDevices] = useState(false);
   const hasStartedLocalPeerRef = useRef(false);
   const isDeviceSurfaceActive = currentTab === 'devices';
-  const effectivePiCwd = useMemo(() => normalizeAbsoluteWorkspace(piCwd, runtimeConfig?.repoRoot), [piCwd, runtimeConfig?.repoRoot]);
+  const effectivePiCwd = useMemo(
+    () => normalizeAbsoluteWorkspace(piCwd, runtimeConfig?.defaultWorkspace || runtimeConfig?.repoRoot),
+    [piCwd, runtimeConfig?.defaultWorkspace, runtimeConfig?.repoRoot],
+  );
   const effectiveTheme = theme === 'system' ? (systemPrefersDark ? 'dark' : 'light') : theme;
 
   useEffect(() => {

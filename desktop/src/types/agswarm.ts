@@ -109,6 +109,7 @@ export type RuntimeConfig = {
   deviceLabel?: string;
   natsUrl?: string;
   repoRoot?: string;
+  defaultWorkspace?: string;
 };
 
 export type FrontendDebugLogRequest = {

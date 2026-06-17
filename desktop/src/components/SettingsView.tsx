@@ -323,7 +323,7 @@ export function SettingsView({
             onChange={(value) => onModelNameChange(value || 'gpt-5.5')}
             data={['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini']}
           />
-          <TextInput label="Host Working Directory" description="Base directory used by pi and local desktop tools. Leave empty to use the AgSwarm repo." leftSection={<Folder size={16} />} value={piCwd} onChange={(event) => onPiCwdChange(event.currentTarget.value)} />
+          <TextInput label="Host Working Directory" description="Base directory used by Ag and local desktop tools. Leave empty to use your AgSwarm workspace folder." leftSection={<Folder size={16} />} value={piCwd} onChange={(event) => onPiCwdChange(event.currentTarget.value)} />
           <Textarea label="Agent Skills" description="Comma-separated list of allowed skills" autosize minRows={3} value={agentSkills} onChange={(event) => onAgentSkillsChange(event.currentTarget.value)} />
         </SettingsCard>
 
