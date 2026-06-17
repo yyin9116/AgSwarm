@@ -76,7 +76,7 @@ jobs:
         env:
           TAURI_SIDECAR_TARGET: x86_64-unknown-linux-gnu
           NODE_VERSION: ${{ env.NODE_VERSION }}
-        run: npm run prepare:sidecars -- --target x86_64-unknown-linux-gnu --force
+        run: npm run prepare:sidecars -- --target x86_64-unknown-linux-gnu --force --skip-pty-prebuild
 
       - name: Check Linux sidecars for Rust check
         working-directory: s/desktop

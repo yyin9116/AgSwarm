@@ -66,6 +66,7 @@ const nodeVersion = (args.nodeVersion || process.env.NODE_VERSION || DEFAULT_NOD
 const skipNode = args.skipNode === 'true';
 const skipBridge = args.skipBridge === 'true';
 const skipRuntime = args.skipRuntime === 'true';
+const skipPtyPrebuild = args.skipPtyPrebuild === 'true';
 
 if (!skipNode) {
   await prepareNodeSidecar(target, config, nodeVersion);
@@ -164,7 +165,7 @@ async function preparePiWebRuntime(target) {
   await access(path.join(piWebPackageDir, 'dist', 'server', 'index.js'));
   await access(path.join(piWebPackageDir, 'dist', 'server', 'sessiond.js'));
   await access(path.join(piWebPackageDir, 'dist', 'server', 'app.js'));
-  await ensureNodePtyPrebuild(target);
+  await ensureNodePtyPrebuild(target, { skip: skipPtyPrebuild });
 
   if (!existsSync(path.join(piWebClientDir, 'index.html'))) {
     await cp(path.join(piWebPackageDir, 'dist', 'client'), piWebClientDir, { recursive: true });
@@ -201,9 +202,16 @@ function removeRuntimeArchivePlaceholder(target) {
   console.log(`Skipped pi-web runtime archive for ${target}; removed stale archive at ${runtimeArchivePath}.`);
 }
 
-async function ensureNodePtyPrebuild(target) {
+async function ensureNodePtyPrebuild(target, options = {}) {
   const prebuild = nodePtyPrebuildName(target);
   if (!prebuild) return;
+  if (options.skip) {
+    if (target !== 'x86_64-unknown-linux-gnu') {
+      throw new Error('--skip-pty-prebuild is only allowed for the non-shipping Linux CI resource check target.');
+    }
+    console.log(`Skipped node-pty prebuild for ${target}; this target is not packaged for release.`);
+    return;
+  }
   const runtimeNodePtyDir = path.join(runtimeDir, 'node_modules', 'node-pty');
   const runtimePrebuildDir = path.join(runtimeNodePtyDir, 'prebuilds', prebuild);
   const runtimePty = path.join(runtimePrebuildDir, 'pty.node');
