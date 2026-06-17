@@ -20,6 +20,7 @@ const SUPPORTED_TARGETS = [
 const args = new Set(process.argv.slice(2));
 const targetArg = readArg(process.argv.slice(2), '--target') || process.env.TAURI_SIDECAR_TARGET;
 const checkAll = args.has('--all');
+const skipRuntime = args.has('--skip-runtime');
 const current = SUPPORTED_TARGETS.find(target => target.platform === os.platform() && target.arch === os.arch());
 const explicitTarget = targetArg ? SUPPORTED_TARGETS.find(target => target.triple === targetArg) : undefined;
 const targets = checkAll ? SUPPORTED_TARGETS : explicitTarget ? [explicitTarget] : current ? [current] : [];
@@ -42,7 +43,7 @@ for (const target of targets) {
       missing.push({ target, fileName, filePath });
     }
   }
-  checkPiWebRuntime(target);
+  if (!skipRuntime) checkPiWebRuntime(target);
 }
 
 if (missing.length) {
@@ -58,7 +59,7 @@ if (missing.length) {
 }
 
 const targetLabel = checkAll ? 'all configured desktop targets' : targets[0].label;
-console.log(`Sidecar check passed for ${targetLabel}.`);
+console.log(`Sidecar check passed for ${targetLabel}${skipRuntime ? ' (runtime skipped)' : ''}.`);
 
 function checkPiWebRuntime(target) {
   for (const filePath of requiredRuntimeFiles(target)) {
