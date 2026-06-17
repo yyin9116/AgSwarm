@@ -77,6 +77,8 @@ if (!skipBridge) {
 
 if (!skipRuntime) {
   await preparePiWebRuntime(target);
+} else {
+  writeSkippedRuntimeArchive(target);
 }
 
 console.log(`Prepared Tauri sidecars for ${target}.`);
@@ -192,6 +194,14 @@ function createRuntimeArchive() {
     run('zip', ['-qr', runtimeArchivePath, 'runtime-node'], { cwd: binariesDir });
   }
   console.log(`Archived pi-web runtime: ${runtimeArchivePath}`);
+}
+
+function writeSkippedRuntimeArchive(target) {
+  writeFile(
+    runtimeArchivePath,
+    `AgSwarm runtime archive intentionally skipped for ${target} Rust checks.\n`,
+  );
+  console.log(`Wrote skipped runtime placeholder: ${runtimeArchivePath}`);
 }
 
 async function ensureNodePtyPrebuild(target) {
