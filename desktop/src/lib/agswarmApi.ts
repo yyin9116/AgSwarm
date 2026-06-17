@@ -14,6 +14,9 @@ import type {
   PiCommandsResponse,
   PiWebStatus,
   RuntimeConfig,
+  SaveChatAttachmentRequest,
+  StageChatAttachmentRequest,
+  StagedChatAttachment,
 } from '../types/agswarm';
 
 const hasTauriRuntime = () => isTauri();
@@ -278,6 +281,35 @@ export async function writeFrontendDebugLog(request: FrontendDebugLogRequest): P
     return;
   }
   await invoke<void>('frontend_debug_log', { request });
+}
+
+export async function stageChatAttachment(request: StageChatAttachmentRequest): Promise<StagedChatAttachment> {
+  if (!hasTauriRuntime()) {
+    const name = request.sourcePath.split(/[\\/]/).filter(Boolean).pop() || 'attachment';
+    return {
+      name,
+      sourcePath: request.sourcePath,
+      stagedPath: request.sourcePath,
+      relativePath: name,
+      sizeBytes: 0,
+      copied: false,
+    };
+  }
+  return invoke<StagedChatAttachment>('stage_chat_attachment', { request });
+}
+
+export async function saveChatAttachment(request: SaveChatAttachmentRequest): Promise<StagedChatAttachment> {
+  if (!hasTauriRuntime()) {
+    return {
+      name: request.name,
+      sourcePath: request.name,
+      stagedPath: request.name,
+      relativePath: request.name,
+      sizeBytes: request.bytes.length,
+      copied: true,
+    };
+  }
+  return invoke<StagedChatAttachment>('save_chat_attachment', { request });
 }
 
 export async function setWindowTitle(title: string): Promise<void> {

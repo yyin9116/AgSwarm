@@ -17,14 +17,14 @@ import {
   ThemeIcon,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { Activity, Bot, BrainCircuit, CheckCircle2, Cpu, Download, ExternalLink, FileCode, Folder, Key, Moon, Power, Radar, RefreshCw, Save, Sun, UserRound } from 'lucide-react';
-import type { DeviceAliasSettings } from '../lib/settingsStore';
+import { Activity, Bot, BrainCircuit, CheckCircle2, Cpu, Download, ExternalLink, FileCode, Folder, Key, MonitorCog, Moon, Power, Radar, RefreshCw, Save, Sun, UserRound } from 'lucide-react';
+import type { DeviceAliasSettings, ThemeMode } from '../lib/settingsStore';
 import { checkForAppUpdate, installPendingAppUpdate, manualDownloadUrl, type AppUpdateInfo, type UpdateDownloadProgress } from '../lib/updatesService';
 import type { LocalPeerStatus } from '../types/agswarm';
 
 interface SettingsViewProps {
-  theme: 'light' | 'dark';
-  onThemeChange: (theme: 'light' | 'dark') => void;
+  theme: ThemeMode;
+  onThemeChange: (theme: ThemeMode) => void;
   providerUrl: string;
   onProviderUrlChange: (value: string) => void;
   apiKey: string;
@@ -234,17 +234,18 @@ export function SettingsView({
           <Group justify="space-between" align="center">
             <div>
               <Text fw={600}>Appearance</Text>
-              <Text c="dimmed" size="sm">Toggle dark mode</Text>
+              <Text c="dimmed" size="sm">Follow the system appearance or choose a fixed theme</Text>
             </div>
             <Select
               value={theme}
-              onChange={(value) => onThemeChange(value === 'dark' ? 'dark' : 'light')}
+              onChange={(value) => onThemeChange(isThemeMode(value) ? value : 'system')}
               data={[
+                { value: 'system', label: 'Follow system' },
                 { value: 'light', label: 'Light' },
                 { value: 'dark', label: 'Dark' },
               ]}
-              leftSection={theme === 'dark' ? <Moon size={16} /> : <Sun size={16} />}
-              w={180}
+              leftSection={theme === 'system' ? <MonitorCog size={16} /> : theme === 'dark' ? <Moon size={16} /> : <Sun size={16} />}
+              w={210}
             />
           </Group>
           <TextInput label="Device Name" description="How you appear to others on the local network" value={deviceLabel} onChange={(event) => onDeviceLabelChange(event.currentTarget.value)} />
@@ -403,6 +404,10 @@ function updateErrorMessage(error: unknown): string {
     return 'Could not reach the update server. Check the network connection and try again.';
   }
   return message;
+}
+
+function isThemeMode(value: string | null): value is ThemeMode {
+  return value === 'system' || value === 'light' || value === 'dark';
 }
 
 function SettingsCard({

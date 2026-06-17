@@ -1,7 +1,9 @@
 import { Suspense, lazy, startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { getCurrentWebview } from '@tauri-apps/api/webview';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Radar, ArrowRightLeft, Settings, MessageSquareText } from 'lucide-react';
-import { ActionIcon, Group, Loader, MantineProvider, Paper, Stack, Tooltip } from '@mantine/core';
-import { Notifications } from '@mantine/notifications';
+import { ActionIcon, Button, Group, Loader, MantineProvider, Modal, Paper, Stack, Text, Tooltip } from '@mantine/core';
+import { Notifications, notifications } from '@mantine/notifications';
 import { DevicesView, Device, FileTransfer, RecentTask } from './components/DevicesView';
 import { TasksView, Task } from './components/TasksView';
 import { SettingsView } from './components/SettingsView';
@@ -11,6 +13,7 @@ import {
   getRuntimeConfig,
   getSystemDeviceName,
   runAgSwarmCli,
+  saveChatAttachment,
   setWindowTitle,
   startLocalPeer,
   writeFrontendDebugLog,
@@ -38,10 +41,108 @@ const LOCAL_STATUS_BACKGROUND_MS = 45_000;
 const DEVICE_REFRESH_ACTIVE_MS = 20_000;
 const DEVICE_REFRESH_ON_ENTER_DELAY_MS = 520;
 
+type DroppedFile = {
+  name: string;
+  size: number;
+  sourcePath?: string;
+  file?: File;
+};
+
+type ChatActivityEvent = {
+  id: number;
+  label: string;
+  detail?: string;
+  tone?: 'neutral' | 'error';
+};
+
 function piProviderFromSetting(providerUrl: string): string {
   const value = providerUrl.trim();
   if (!value) return 'local-openai';
   return /^https?:\/\//i.test(value) ? 'local-openai' : value;
+}
+
+function normalizeAbsoluteWorkspace(value: string, fallback?: string): string {
+  const trimmed = value.trim();
+  if (trimmed && isAbsoluteWorkspacePath(trimmed)) return trimmed;
+  const fallbackValue = fallback?.trim() || '';
+  if (fallbackValue && isAbsoluteWorkspacePath(fallbackValue)) return fallbackValue;
+  return '';
+}
+
+function isAbsoluteWorkspacePath(value: string): boolean {
+  return value.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith('\\\\');
+}
+
+function formatBytes(value: number): string {
+  if (!value) return '';
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${Math.round(value / 102.4) / 10} KB`;
+  return `${Math.round(value / 1024 / 102.4) / 10} MB`;
+}
+
+function deviceIdAtWindowPoint(x: number, y: number, scaleFactor = 1): string | undefined {
+  const candidates = [
+    { x, y },
+    ...(scaleFactor && scaleFactor !== 1 ? [{ x: x / scaleFactor, y: y / scaleFactor }] : []),
+  ];
+  for (const point of candidates) {
+    const precise = deviceIdAtDomPoint(point.x, point.y, 0);
+    if (precise) return precise;
+  }
+  for (const point of candidates) {
+    const forgiving = deviceIdAtDomPoint(point.x, point.y, 16);
+    if (forgiving) return forgiving;
+  }
+  return undefined;
+}
+
+function deviceIdAtDomPoint(x: number, y: number, tolerance: number): string | undefined {
+  if (tolerance === 0) {
+    const element = document.elementFromPoint(x, y)?.closest('[data-device-drop-id]');
+    if (element instanceof HTMLElement && element.dataset.deviceDropId) return element.dataset.deviceDropId;
+  }
+
+  const cards = Array.from(document.querySelectorAll<HTMLElement>('[data-device-drop-id]'));
+  for (const card of cards) {
+    const rect = card.getBoundingClientRect();
+    const inside =
+      x >= rect.left - tolerance
+      && x <= rect.right + tolerance
+      && y >= rect.top - tolerance
+      && y <= rect.bottom + tolerance;
+    if (inside && card.dataset.deviceDropId) return card.dataset.deviceDropId;
+  }
+  return undefined;
+}
+
+function pathToDroppedFile(path: string): DroppedFile {
+  return {
+    name: basename(path),
+    size: 0,
+    sourcePath: path,
+  };
+}
+
+function fileToDroppedFile(file: File): DroppedFile {
+  return {
+    name: file.name || 'attachment',
+    size: file.size,
+    file,
+  };
+}
+
+async function saveDroppedBrowserFile(file: DroppedFile, workspaceRoot: string) {
+  if (!file.file) throw new Error('Dropped file is missing file content.');
+  const bytes = Array.from(new Uint8Array(await file.file.arrayBuffer()));
+  return saveChatAttachment({
+    name: file.name || 'attachment',
+    workspaceRoot,
+    bytes,
+  });
+}
+
+function basename(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).pop() || 'attachment';
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -54,7 +155,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   defaultSavePath: '~/Downloads/AgentTasks',
   agentSkills: 'safe_default',
   enablePi: true,
-  theme: 'light',
+  theme: 'system',
   userDisplayName: 'You',
   userAvatarSeed: 'You',
   agDisplayName: 'Ag',
@@ -70,9 +171,15 @@ export default function App() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [selectedDevice, setSelectedDevice] = useState<Device | null>(null);
   const [selectedFileForDevice, setSelectedFileForDevice] = useState<File | null>(null);
+  const [pendingDeviceDrop, setPendingDeviceDrop] = useState<{ device: Device; files: DroppedFile[] } | null>(null);
+  const [windowDrag, setWindowDrag] = useState<{ active: boolean; paths: string[]; overDeviceId?: string }>({ active: false, paths: [] });
+  const [chatAttachmentDrop, setChatAttachmentDrop] = useState<{ id: number; paths: string[] } | null>(null);
+  const [chatActivityEvent, setChatActivityEvent] = useState<ChatActivityEvent | null>(null);
+  const [deliveryAnimation, setDeliveryAnimation] = useState<{ deviceId: string; fileName: string; id: number } | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [transfers, setTransfers] = useState<FileTransfer[]>([]);
   const [settings, setSettings] = useState(() => loadAppSettings(DEFAULT_SETTINGS));
+  const [systemPrefersDark, setSystemPrefersDark] = useState(() => window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false);
   const {
     theme,
     providerUrl,
@@ -97,10 +204,14 @@ export default function App() {
   const [localPeerStatus, setLocalPeerStatus] = useState<LocalPeerStatus | null>(null);
   const [localPeerStatusForMerge, setLocalPeerStatusForMerge] = useState<LocalPeerStatus | null>(null);
   const localPeerStatusForMergeRef = useRef<LocalPeerStatus | null>(null);
+  const windowScaleFactorRef = useRef(1);
+  const dragOverDeviceIdRef = useRef<string | undefined>(undefined);
   const [deviceStatusMessage, setDeviceStatusMessage] = useState('No devices loaded yet. Refresh to query NATS.');
   const [isRefreshingDevices, setIsRefreshingDevices] = useState(false);
   const hasStartedLocalPeerRef = useRef(false);
   const isDeviceSurfaceActive = currentTab === 'devices';
+  const effectivePiCwd = useMemo(() => normalizeAbsoluteWorkspace(piCwd, runtimeConfig?.repoRoot), [piCwd, runtimeConfig?.repoRoot]);
+  const effectiveTheme = theme === 'system' ? (systemPrefersDark ? 'dark' : 'light') : theme;
 
   useEffect(() => {
     localPeerStatusForMergeRef.current = localPeerStatusForMerge;
@@ -111,8 +222,80 @@ export default function App() {
   }, [settings]);
 
   useEffect(() => {
+    const media = window.matchMedia?.('(prefers-color-scheme: dark)');
+    if (!media) return;
+    const update = () => setSystemPrefersDark(media.matches);
+    update();
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
+
+  useEffect(() => {
     setDevices(prev => applyDeviceAliases(prev, deviceAliases));
   }, [deviceAliases]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    getCurrentWindow().scaleFactor()
+      .then(value => {
+        if (!disposed && Number.isFinite(value) && value > 0) windowScaleFactorRef.current = value;
+      })
+      .catch(() => undefined);
+    const deviceIdAtPosition = (x: number, y: number) => deviceIdAtWindowPoint(x, y, windowScaleFactorRef.current);
+    getCurrentWebview().onDragDropEvent(event => {
+      if (disposed) return;
+      if (event.payload.type === 'enter') {
+        const overDeviceId = deviceIdAtPosition(event.payload.position.x, event.payload.position.y);
+        dragOverDeviceIdRef.current = overDeviceId;
+        setWindowDrag({
+          active: true,
+          paths: event.payload.paths,
+          overDeviceId,
+        });
+        return;
+      }
+      if (event.payload.type === 'over') {
+        const { position } = event.payload;
+        const overDeviceId = deviceIdAtPosition(position.x, position.y);
+        dragOverDeviceIdRef.current = overDeviceId || dragOverDeviceIdRef.current;
+        setWindowDrag(current => ({
+          ...current,
+          active: true,
+          overDeviceId,
+        }));
+        return;
+      }
+      if (event.payload.type === 'drop') {
+        const overDeviceId = deviceIdAtPosition(event.payload.position.x, event.payload.position.y) || dragOverDeviceIdRef.current;
+        const targetDevice = devices.find(device => device.id === overDeviceId);
+        const paths = event.payload.paths;
+        setWindowDrag({ active: false, paths: [] });
+        dragOverDeviceIdRef.current = undefined;
+        if (targetDevice && paths.length) {
+          setPendingDeviceDrop({ device: targetDevice, files: paths.map(pathToDroppedFile) });
+        } else if (currentTab === 'chat' && paths.length) {
+          setChatAttachmentDrop({ id: Date.now(), paths });
+        } else if (currentTab === 'devices' && paths.length) {
+          notifications.show({
+            color: 'gray',
+            title: 'Choose a device',
+            message: 'Drop files directly on a device card to send them.',
+          });
+        }
+        return;
+      }
+      dragOverDeviceIdRef.current = undefined;
+      setWindowDrag({ active: false, paths: [] });
+    }).then(unlistenFn => {
+      if (disposed) unlistenFn();
+      else unlisten = unlistenFn;
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [currentTab, devices]);
 
   useEffect(() => {
     const dump = (label = 'app-dom') => {
@@ -238,7 +421,7 @@ export default function App() {
           enablePi,
           piModel: agentModel,
           piProvider: piProviderFromSetting(providerUrl),
-          piCwd,
+          piCwd: effectivePiCwd,
           startNats: true,
         });
         if (!disposed) {
@@ -280,7 +463,7 @@ export default function App() {
     return () => {
       disposed = true;
     };
-  }, [runtimeConfigLoaded]);
+  }, [runtimeConfigLoaded, effectivePiCwd]);
 
   useEffect(() => {
     if (!runtimeConfigLoaded) return;
@@ -381,7 +564,7 @@ export default function App() {
       enablePi,
       piModel: agentModel,
       piProvider: piProviderFromSetting(providerUrl),
-      piCwd,
+      piCwd: effectivePiCwd,
       startNats: true,
     });
     setLocalPeerStatus(status);
@@ -411,6 +594,7 @@ export default function App() {
     options: { switchToTasks?: boolean; targetDeviceName?: string; quiet?: boolean } = {},
   ) => {
     const taskId = `tsk-${Date.now()}`;
+    const transferId = taskData.type === 'File' ? `tf-${Date.now()}` : '';
     const target = taskData.target || nodeId;
     const detail = taskDetail(taskData);
     const newTask: Task = {
@@ -424,6 +608,16 @@ export default function App() {
     };
     if (!options.quiet) {
       setTasks(prev => [newTask, ...prev]);
+    }
+    if (taskData.type === 'File') {
+      setTransfers(prev => [{
+        id: transferId,
+        fileName: taskData.fileName || taskData.sourcePath || 'uploaded file',
+        targetDeviceName: options.targetDeviceName || target,
+        progress: 18,
+        status: 'transferring',
+        size: taskData.fileSize || '',
+      }, ...prev]);
     }
     setDevices(prev => prev.map(device => device.id === target ? { ...device, status: 'transferring', activeTask: { type: taskData.type, status: 'executing' } } : device));
     if (options.switchToTasks) {
@@ -451,14 +645,11 @@ export default function App() {
         } : task));
       }
       if (taskData.type === 'File') {
-        setTransfers(prev => [{
-          id: `tf-${Date.now()}`,
-          fileName: taskData.fileName || taskData.sourcePath || 'uploaded file',
-          targetDeviceName: options.targetDeviceName || target,
+        setTransfers(prev => prev.map(transfer => transfer.id === transferId ? {
+          ...transfer,
           progress: 100,
           status: 'completed',
-          size: taskData.fileSize || '',
-        }, ...prev]);
+        } : transfer));
       }
       return response;
     } catch (error) {
@@ -471,14 +662,11 @@ export default function App() {
         } : task));
       }
       if (taskData.type === 'File') {
-        setTransfers(prev => [{
-          id: `tf-${Date.now()}`,
-          fileName: taskData.fileName || taskData.sourcePath || 'uploaded file',
-          targetDeviceName: options.targetDeviceName || target,
+        setTransfers(prev => prev.map(transfer => transfer.id === transferId ? {
+          ...transfer,
           progress: 0,
           status: 'failed',
-          size: taskData.fileSize || '',
-        }, ...prev]);
+        } : transfer));
       }
       throw error;
     } finally {
@@ -490,10 +678,78 @@ export default function App() {
     await dispatchTask(taskData, { switchToTasks: true });
   };
 
+  const handleConfirmDeviceDrop = useCallback(async () => {
+    const drop = pendingDeviceDrop;
+    if (!drop) return;
+    const { device, files } = drop;
+    setPendingDeviceDrop(null);
+    if (!files.length) return;
+    if (!effectivePiCwd) {
+      notifications.show({
+        color: 'red',
+        title: 'Working directory required',
+        message: 'Set an absolute Host Working Directory before sending files.',
+      });
+      return;
+    }
+    notifications.show({
+      color: 'teal',
+      title: files.length === 1 ? `Sending ${files[0].name}` : `Sending ${files.length} files`,
+      message: `Target: ${device.name}`,
+    });
+    for (const file of files) {
+      try {
+        setDeliveryAnimation({ deviceId: device.id, fileName: file.name, id: Date.now() });
+        window.setTimeout(() => {
+          setDeliveryAnimation(current => current?.deviceId === device.id && current.fileName === file.name ? null : current);
+        }, 1200);
+        const staged = file.sourcePath
+          ? {
+              name: file.name,
+              stagedPath: file.sourcePath,
+              sizeBytes: file.size,
+            }
+          : await saveDroppedBrowserFile(file, effectivePiCwd);
+        await dispatchTask({
+          type: 'File',
+          target: device.id,
+          payload: file.name || staged.name,
+          sourcePath: staged.stagedPath,
+          fileName: staged.name,
+          fileSize: formatBytes(staged.sizeBytes),
+        }, {
+          targetDeviceName: device.name,
+        });
+        setChatActivityEvent({
+          id: Date.now(),
+          label: `Sent ${staged.name} to ${device.name}`,
+          detail: 'The file transfer was dispatched to the selected device.',
+        });
+      } catch (error) {
+        setChatActivityEvent({
+          id: Date.now(),
+          label: `Failed to send ${file.name || 'file'} to ${device.name}`,
+          detail: formatError(error),
+          tone: 'error',
+        });
+        notifications.show({
+          color: 'red',
+          title: `Failed to send ${file.name || 'file'}`,
+          message: formatError(error),
+        });
+      }
+    }
+  }, [dispatchTask, effectivePiCwd, pendingDeviceDrop]);
+
+  const handleDropFilesToDevice = useCallback((device: Device, files: File[]) => {
+    if (!files.length) return;
+    setPendingDeviceDrop({ device, files: files.map(fileToDroppedFile) });
+  }, []);
+
   return (
-    <MantineProvider forceColorScheme={theme}>
+    <MantineProvider forceColorScheme={effectiveTheme}>
       <Notifications position="top-center" />
-      <div className={`h-screen overflow-hidden font-sans selection:bg-teal-500/30 ${theme === 'dark' ? 'dark' : ''}`}>
+      <div className={`h-screen overflow-hidden font-sans selection:bg-teal-500/30 ${effectiveTheme === 'dark' ? 'dark' : ''}`} data-theme-mode={theme}>
       <main className="min-h-0 h-full overflow-hidden">
         <div className="agswarm-tab-stack">
           <section
@@ -510,7 +766,7 @@ export default function App() {
               )}
             >
               <PiWebNativeChatView
-                piCwd={piCwd}
+                piCwd={effectivePiCwd}
                 localNodeId={nodeId}
                 localDeviceLabel={deviceLabel}
                 userDisplayName={userDisplayName}
@@ -520,6 +776,8 @@ export default function App() {
                 deviceAliases={deviceAliases}
                 devices={devices}
                 deviceStatusMessage={deviceStatusMessage}
+                externalAttachmentDrop={chatAttachmentDrop}
+                externalActivity={chatActivityEvent}
               />
             </Suspense>
           </section>
@@ -534,11 +792,14 @@ export default function App() {
               devices={devices}
               transfers={transfers}
               onSelectDevice={handleSelectDevice}
+              onDropFilesToDevice={handleDropFilesToDevice}
               onCancelTransfer={handleCancelTransfer}
               onRefreshDevices={handleRefreshDevices}
               isRefreshing={isRefreshingDevices}
               statusMessage={deviceStatusMessage}
               localNodeId={nodeId}
+              externalDragOverDeviceId={windowDrag.active ? windowDrag.overDeviceId : undefined}
+              deliveryAnimation={deliveryAnimation}
               deviceAliases={deviceAliases}
               onDeviceAliasesChange={(value) => updateSetting('deviceAliases', value)}
               onRenameLocalDevice={handleRenameLocalDevice}
@@ -616,6 +877,8 @@ export default function App() {
             return (
               <Tooltip key={tab.id} label={tab.label}>
                 <ActionIcon
+                  className="agswarm-nav-button"
+                  data-active={isActive ? 'true' : undefined}
                   variant={isActive ? 'light' : 'subtle'}
                   color={isActive ? 'teal' : 'gray'}
                   radius="xl"
@@ -641,6 +904,50 @@ export default function App() {
         initialFile={selectedFileForDevice}
         initialTaskType={selectedFileForDevice ? 'file' : undefined}
       />
+      {windowDrag.active && (
+        <div className={`agswarm-window-drop-overlay ${currentTab === 'devices' ? 'is-device-drag' : ''}`}>
+          <div>
+            <Text fw={700}>{currentTab === 'devices' ? 'Drop on a device to send' : currentTab === 'chat' ? 'Drop to attach to chat' : 'Drop files into AgSwarm'}</Text>
+            <Text size="sm" c="dimmed">
+              {currentTab === 'devices'
+                ? (windowDrag.overDeviceId ? 'Release to confirm file transfer.' : 'Move over a device card before releasing.')
+                : currentTab === 'chat'
+                  ? 'Release to add files to the message composer.'
+                  : 'Switch to Devices to send files to a device, or Chat to attach files.'}
+            </Text>
+          </div>
+        </div>
+      )}
+      <Modal
+        opened={Boolean(pendingDeviceDrop)}
+        onClose={() => setPendingDeviceDrop(null)}
+        title={pendingDeviceDrop ? `Send to ${pendingDeviceDrop.device.name}` : 'Send files'}
+        centered
+        radius="md"
+      >
+        {pendingDeviceDrop && (
+          <Stack gap="md">
+            <Text size="sm" c="dimmed">
+              Confirm sending {pendingDeviceDrop.files.length === 1 ? pendingDeviceDrop.files[0].name : `${pendingDeviceDrop.files.length} files`} to this device.
+            </Text>
+            <Stack gap={6}>
+              {pendingDeviceDrop.files.slice(0, 6).map((file, index) => (
+                <Group key={`${file.name}-${file.size}-${file.sourcePath || index}`} justify="space-between" wrap="nowrap">
+                  <Text size="sm" truncate>{file.name}</Text>
+                  <Text size="xs" c="dimmed">{formatBytes(file.size)}</Text>
+                </Group>
+              ))}
+              {pendingDeviceDrop.files.length > 6 && (
+                <Text size="xs" c="dimmed">+{pendingDeviceDrop.files.length - 6} more</Text>
+              )}
+            </Stack>
+            <Group justify="flex-end">
+              <Button variant="subtle" color="gray" onClick={() => setPendingDeviceDrop(null)}>Cancel</Button>
+              <Button color="teal" onClick={() => void handleConfirmDeviceDrop()}>Send</Button>
+            </Group>
+          </Stack>
+        )}
+      </Modal>
       </div>
     </MantineProvider>
   );

@@ -1,3 +1,5 @@
+export type ThemeMode = 'system' | 'light' | 'dark';
+
 export interface AppSettings {
   providerUrl: string;
   agentModel: string;
@@ -8,7 +10,7 @@ export interface AppSettings {
   defaultSavePath: string;
   agentSkills: string;
   enablePi: boolean;
-  theme: 'light' | 'dark';
+  theme: ThemeMode;
   userDisplayName: string;
   userAvatarSeed: string;
   agDisplayName: string;
@@ -31,7 +33,7 @@ export function loadAppSettings(defaults: AppSettings): AppSettings {
     return {
       ...defaults,
       ...parsed,
-      theme: parsed.theme === 'dark' ? 'dark' : 'light',
+      theme: normalizeThemeMode(parsed.theme),
       enablePi: typeof parsed.enablePi === 'boolean' ? parsed.enablePi : defaults.enablePi,
       userDisplayName: normalizeText(parsed.userDisplayName, defaults.userDisplayName),
       userAvatarSeed: normalizeText(parsed.userAvatarSeed, defaults.userAvatarSeed),
@@ -43,6 +45,11 @@ export function loadAppSettings(defaults: AppSettings): AppSettings {
     localStorage.removeItem(SETTINGS_KEY);
     return defaults;
   }
+}
+
+function normalizeThemeMode(value: unknown): ThemeMode {
+  if (value === 'dark' || value === 'light' || value === 'system') return value;
+  return 'system';
 }
 
 export function saveAppSettings(settings: AppSettings): void {

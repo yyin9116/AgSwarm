@@ -68,6 +68,32 @@ struct FrontendDebugLogRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct StageChatAttachmentRequest {
+    source_path: String,
+    workspace_root: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveChatAttachmentRequest {
+    name: String,
+    workspace_root: String,
+    bytes: Vec<u8>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StagedChatAttachment {
+    name: String,
+    source_path: String,
+    staged_path: String,
+    relative_path: String,
+    size_bytes: u64,
+    copied: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct LocalPeerRequest {
     nats_url: String,
     node_id: String,
@@ -141,6 +167,7 @@ struct RuntimeConfig {
     node_id: Option<String>,
     device_label: Option<String>,
     nats_url: Option<String>,
+    repo_root: Option<String>,
 }
 
 #[derive(Default)]
@@ -219,6 +246,133 @@ fn append_frontend_debug_log(label: &str, payload: Value) -> Result<(), String> 
     writeln!(file, "{serialized}")
         .map_err(|err| format!("failed to write frontend debug log: {err}"))?;
     Ok(())
+}
+
+#[tauri::command]
+fn stage_chat_attachment(request: StageChatAttachmentRequest) -> Result<StagedChatAttachment, String> {
+    let workspace_root = normalize_path(Path::new(request.workspace_root.trim()));
+    if !workspace_root.is_absolute() || !workspace_root.is_dir() {
+        return Err("Host Working Directory must be an existing absolute path before attaching files.".to_string());
+    }
+    let source_path = normalize_path(Path::new(request.source_path.trim()));
+    if !source_path.is_file() {
+        return Err("Only files can be attached to chat right now.".to_string());
+    }
+    let metadata = fs::metadata(&source_path)
+        .map_err(|err| format!("failed to inspect attachment: {err}"))?;
+    let name = source_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(sanitize_attachment_name)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "attachment".to_string());
+    if source_path.starts_with(&workspace_root) {
+        let relative = source_path
+            .strip_prefix(&workspace_root)
+            .map_err(|err| format!("failed to resolve workspace attachment path: {err}"))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        return Ok(StagedChatAttachment {
+            name,
+            source_path: source_path.to_string_lossy().to_string(),
+            staged_path: source_path.to_string_lossy().to_string(),
+            relative_path: relative,
+            size_bytes: metadata.len(),
+            copied: false,
+        });
+    }
+
+    let attachment_dir = workspace_root.join(".agswarm").join("attachments");
+    fs::create_dir_all(&attachment_dir)
+        .map_err(|err| format!("failed to create attachment directory: {err}"))?;
+    let staged_name = unique_attachment_name(&attachment_dir, &name);
+    let staged_path = attachment_dir.join(staged_name);
+    fs::copy(&source_path, &staged_path)
+        .map_err(|err| format!("failed to copy attachment into workspace: {err}"))?;
+    let relative = staged_path
+        .strip_prefix(&workspace_root)
+        .map_err(|err| format!("failed to resolve staged attachment path: {err}"))?
+        .to_string_lossy()
+        .replace('\\', "/");
+    Ok(StagedChatAttachment {
+        name,
+        source_path: source_path.to_string_lossy().to_string(),
+        staged_path: staged_path.to_string_lossy().to_string(),
+        relative_path: relative,
+        size_bytes: metadata.len(),
+        copied: true,
+    })
+}
+
+#[tauri::command]
+fn save_chat_attachment(request: SaveChatAttachmentRequest) -> Result<StagedChatAttachment, String> {
+    let workspace_root = normalize_path(Path::new(request.workspace_root.trim()));
+    if !workspace_root.is_absolute() || !workspace_root.is_dir() {
+        return Err("Host Working Directory must be an existing absolute path before attaching files.".to_string());
+    }
+    let name = sanitize_attachment_name(&request.name)
+        .trim()
+        .to_string();
+    let name = if name.is_empty() { "attachment".to_string() } else { name };
+    let attachment_dir = workspace_root.join(".agswarm").join("attachments");
+    fs::create_dir_all(&attachment_dir)
+        .map_err(|err| format!("failed to create attachment directory: {err}"))?;
+    let staged_name = unique_attachment_name(&attachment_dir, &name);
+    let staged_path = attachment_dir.join(staged_name);
+    fs::write(&staged_path, &request.bytes)
+        .map_err(|err| format!("failed to save attachment into workspace: {err}"))?;
+    let relative = staged_path
+        .strip_prefix(&workspace_root)
+        .map_err(|err| format!("failed to resolve saved attachment path: {err}"))?
+        .to_string_lossy()
+        .replace('\\', "/");
+    Ok(StagedChatAttachment {
+        name,
+        source_path: staged_path.to_string_lossy().to_string(),
+        staged_path: staged_path.to_string_lossy().to_string(),
+        relative_path: relative,
+        size_bytes: request.bytes.len() as u64,
+        copied: true,
+    })
+}
+
+fn sanitize_attachment_name(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|ch| if matches!(ch, '/' | '\\' | ':' | '\0') || ch.is_control() { '_' } else { ch })
+        .collect::<String>()
+        .trim_matches('_')
+        .trim()
+        .to_string();
+    if sanitized == "." || sanitized == ".." {
+        "attachment".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn unique_attachment_name(dir: &Path, name: &str) -> String {
+    let candidate = Path::new(name);
+    let stem = candidate
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("attachment");
+    let extension = candidate
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| format!(".{value}"))
+        .unwrap_or_default();
+    for index in 0..1000 {
+        let next = if index == 0 {
+            format!("{stem}{extension}")
+        } else {
+            format!("{stem}-{index}{extension}")
+        };
+        if !dir.join(&next).exists() {
+            return next;
+        }
+    }
+    format!("{stem}-{}{}", now_millis(), extension)
 }
 
 fn truncate_debug_value(value: Value, max_chars: usize) -> Value {
@@ -1016,6 +1170,7 @@ fn runtime_config() -> RuntimeConfig {
         node_id: env_non_empty("AGSWARM_NODE_ID"),
         device_label: env_non_empty("AGSWARM_DEVICE_LABEL"),
         nats_url: env_non_empty("AGSWARM_NATS_URL"),
+        repo_root: repo_root().ok().map(|path| path.to_string_lossy().to_string()),
     }
 }
 
@@ -1648,6 +1803,17 @@ fn find_node_runtime(app: &tauri::AppHandle, repo_root: &Path) -> Option<String>
         return Some(value);
     }
     for binary_name in node_binary_names() {
+        #[cfg(debug_assertions)]
+        {
+            let candidate = repo_root
+                .join("desktop")
+                .join("src-tauri")
+                .join("binaries")
+                .join(&binary_name);
+            if candidate.is_file() {
+                return Some(candidate.to_string_lossy().to_string());
+            }
+        }
         if let Ok(resource_dir) = app.path().resource_dir() {
             for candidate in [
                 resource_dir.join(&binary_name),
@@ -1733,6 +1899,26 @@ fn resolve_pi_web_package_dir(
     let mut candidates = Vec::new();
     if let Some(path) = env_non_empty("PI_WEB_PACKAGE_DIR") {
         candidates.push(PathBuf::from(path));
+    }
+    #[cfg(debug_assertions)]
+    {
+        candidates.push(
+            repo_root
+                .join("desktop")
+                .join("src-tauri")
+                .join("binaries")
+                .join("runtime-node")
+                .join("node_modules")
+                .join("@jmfederico")
+                .join("pi-web"),
+        );
+        candidates.push(
+            repo_root
+                .join("desktop")
+                .join("src-tauri")
+                .join("binaries")
+                .join("pi-web-package"),
+        );
     }
     if let Ok(resource_dir) = app.path().resource_dir() {
         candidates.push(resource_dir.join("pi-web-package"));
@@ -1826,6 +2012,14 @@ fn resolve_pi_web_server_entry(
     if let Some(path) = env_non_empty("AGSWARM_PI_WEB_SERVER") {
         candidates.push(PathBuf::from(path));
     }
+    #[cfg(debug_assertions)]
+    candidates.push(
+        repo_root
+            .join("desktop")
+            .join("src-tauri")
+            .join("binaries")
+            .join("pi-web-agswarm-server.mjs"),
+    );
     candidates.push(resource_dir.join("binaries").join("pi-web-agswarm-server.mjs"));
     candidates.push(resource_dir.join("pi-web-agswarm-server.mjs"));
     if let Ok(app_resource_dir) = app.path().resource_dir() {
@@ -2134,9 +2328,36 @@ impl CommandPathExt for Command {
 
 fn configure_child_env(command: &mut Command) {
     command.env("PATH", child_path_env());
+    if let Some(shell) = child_shell_env() {
+        command.env("SHELL", shell);
+    }
     #[cfg(windows)]
     {
         command.creation_flags(0x08000000);
+    }
+}
+
+fn child_shell_env() -> Option<String> {
+    if let Ok(shell) = std::env::var("SHELL") {
+        if !shell.trim().is_empty() && Path::new(&shell).is_file() {
+            return Some(shell);
+        }
+    }
+    #[cfg(windows)]
+    {
+        return std::env::var("ComSpec")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| Some("C:\\Windows\\System32\\cmd.exe".to_string()));
+    }
+    #[cfg(not(windows))]
+    {
+        for shell in ["/bin/bash", "/bin/zsh", "/bin/sh"] {
+            if Path::new(shell).is_file() {
+                return Some(shell.to_string());
+            }
+        }
+        None
     }
 }
 
@@ -2203,6 +2424,8 @@ fn main() {
             pi_web_status,
             runtime_config,
             system_device_name,
+            stage_chat_attachment,
+            save_chat_attachment,
             frontend_debug_log
         ])
         .run(tauri::generate_context!())

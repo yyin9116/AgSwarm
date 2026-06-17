@@ -1,23 +1,34 @@
 import { ActionIcon, Badge, Box, Group, Loader, Tooltip } from '@mantine/core';
-import { ChevronLeft, ChevronRight, Copy, MessageSquareText, Plus, RefreshCw, SendHorizontal, Wrench } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Copy, FileUp, MessageSquareText, PanelTop, Plus, RefreshCw, SendHorizontal, Square, Wrench, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { renderPiMarkdown } from '../lib/piMarkdown';
 import type { DeviceAliasSettings } from '../lib/settingsStore';
+import { saveChatAttachment, stageChatAttachment } from '../lib/agswarmApi';
+import type { StagedChatAttachment } from '../types/agswarm';
 import type { Device } from './DevicesView';
+import { PiWebCapabilityPanel } from './PiWebCapabilityPanel';
 import {
+  abortPiWebSession,
   createPiWebSessionSocket,
   ensurePiWebReady,
   getPiWebMessages,
   getPiWebStatus,
   listPiWebCommands,
+  listPiWebModels,
   listPiWebSessions,
+  listPiWebThinkingLevels,
+  resolvePiWebWorkspace,
   runPiWebCommand,
   sendPiWebPrompt,
   startPiWebSession,
+  type PiWebCommandResult,
   type PiWebSessionEvent,
   type PiWebSessionInfo,
+  type PiWebSessionModel,
   type PiWebSessionStatus,
   type PiWebSlashCommand,
+  type PiWebThinkingLevel,
+  type PiWebWorkspaceContext,
 } from '../lib/piWebClient';
 
 type PiWebNativeChatViewProps = {
@@ -31,6 +42,8 @@ type PiWebNativeChatViewProps = {
   deviceAliases: Record<string, DeviceAliasSettings>;
   devices: Device[];
   deviceStatusMessage: string;
+  externalAttachmentDrop?: { id: number; paths: string[] } | null;
+  externalActivity?: { id: number; label: string; detail?: string; tone?: 'neutral' | 'error' } | null;
 };
 
 type TimelineMessage = {
@@ -80,6 +93,9 @@ type TimelineActivity = {
 };
 
 type TimelineItem = TimelineMessage | TimelineReasoning | TimelineTool | TimelineToolGroup | TimelineActivity;
+type PendingAttachment = StagedChatAttachment & { id: string };
+
+type PendingCommandSelect = Extract<PiWebCommandResult, { type: 'select' }>;
 
 type TimelineRenderRow =
   | { kind: 'single'; item: TimelineItem }
@@ -95,7 +111,6 @@ type SpeakerIdentity = {
   };
 };
 
-const DEFAULT_WORKSPACE = '~';
 const AGSWARM_SKILL_COMMANDS: PiWebSlashCommand[] = [
   {
     name: 'skill-search',
@@ -129,22 +144,33 @@ export function PiWebNativeChatView({
   deviceAliases,
   devices,
   deviceStatusMessage,
+  externalAttachmentDrop,
+  externalActivity,
 }: PiWebNativeChatViewProps) {
-  const cwd = piCwd.trim() || DEFAULT_WORKSPACE;
+  const cwd = piCwd.trim();
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const [sessions, setSessions] = useState<PiWebSessionInfo[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState('');
   const [timelineItems, setTimelineItems] = useState<TimelineItem[]>([]);
   const [status, setStatus] = useState<PiWebSessionStatus | null>(null);
   const [commands, setCommands] = useState<PiWebSlashCommand[]>([]);
+  const [models, setModels] = useState<PiWebSessionModel[]>([]);
+  const [thinkingLevels, setThinkingLevels] = useState<PiWebThinkingLevel[]>([]);
   const [composerText, setComposerText] = useState('');
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const [isDraggingFiles, setIsDraggingFiles] = useState(false);
   const [commandPanelOpen, setCommandPanelOpen] = useState(false);
-  const [expandedToolIds, setExpandedToolIds] = useState<Set<string>>(() => new Set());
+  const [toolsPanelOpen, setToolsPanelOpen] = useState(false);
+  const [pendingCommandSelect, setPendingCommandSelect] = useState<PendingCommandSelect | null>(null);
+  const [workspaceContext, setWorkspaceContext] = useState<PiWebWorkspaceContext | null>(null);
+  const [expandedToolId, setExpandedToolId] = useState<string | null>(null);
   const [isBooting, setIsBooting] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isAwaitingAgent, setIsAwaitingAgent] = useState(false);
   const [errorText, setErrorText] = useState('');
   const paneRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
 
   const selectedSession = useMemo(
@@ -166,6 +192,9 @@ export function PiWebNativeChatView({
 
   const loadSessions = useCallback(async (options: { createIfEmpty?: boolean } = {}) => {
     setErrorText('');
+    if (!isAbsoluteWorkspacePath(cwd)) {
+      throw new Error('Choose an absolute Host Working Directory in Settings before starting a conversation.');
+    }
     await ensurePiWebReady();
     let nextSessions = await listPiWebSessions(cwd);
     if (options.createIfEmpty && !nextSessions.some(session => !session.archived)) {
@@ -178,6 +207,78 @@ export function PiWebNativeChatView({
       return nextSessions.find(session => !session.archived)?.id || nextSessions[0]?.id || '';
     });
   }, [cwd]);
+
+  const attachPaths = useCallback(async (paths: string[]) => {
+    const uniquePaths = Array.from(new Set(paths.filter(Boolean)));
+    if (!uniquePaths.length) return;
+    setErrorText('');
+    try {
+      const staged = await Promise.all(uniquePaths.map(sourcePath => stageChatAttachment({
+        sourcePath,
+        workspaceRoot: cwd,
+      })));
+      setAttachments(current => mergeAttachments(current, staged.map(item => ({
+        ...item,
+        id: crypto.randomUUID(),
+      }))));
+      window.setTimeout(() => composerRef.current?.focus(), 40);
+    } catch (error) {
+      setErrorText(error instanceof Error ? error.message : String(error));
+    }
+  }, [cwd]);
+
+  const attachFiles = useCallback(async (files: File[]) => {
+    if (!files.length) return;
+    setErrorText('');
+    try {
+      const staged = await Promise.all(files.map(async file => {
+        const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
+        return saveChatAttachment({
+          name: file.name || 'attachment',
+          workspaceRoot: cwd,
+          bytes,
+        });
+      }));
+      setAttachments(current => mergeAttachments(current, staged.map(item => ({
+        ...item,
+        id: crypto.randomUUID(),
+      }))));
+      window.setTimeout(() => composerRef.current?.focus(), 40);
+    } catch (error) {
+      setErrorText(error instanceof Error ? error.message : String(error));
+    }
+  }, [cwd]);
+
+  const chooseAttachments = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
+
+  useEffect(() => {
+    if (!externalAttachmentDrop?.paths.length) return;
+    void attachPaths(externalAttachmentDrop.paths);
+  }, [attachPaths, externalAttachmentDrop]);
+
+  useEffect(() => {
+    if (!externalActivity) return;
+    setTimelineItems(items => [...items, {
+      kind: 'activity',
+      id: `external-${externalActivity.id}`,
+      label: externalActivity.label,
+      detail: externalActivity.detail,
+      tone: externalActivity.tone || 'neutral',
+      createdAt: new Date().toISOString(),
+    }]);
+  }, [externalActivity]);
+
+  const refreshSessionSnapshot = useCallback(async (session: PiWebSessionInfo) => {
+    const [messages, nextStatus] = await Promise.all([
+      getPiWebMessages(session),
+      session.archived ? Promise.resolve(null) : getPiWebStatus(session),
+    ]);
+    setTimelineItems(current => mergeSnapshotTimeline(current, messagesToTimeline(messages.messages)));
+    setStatus(nextStatus);
+    return { messages, status: nextStatus };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -201,23 +302,47 @@ export function PiWebNativeChatView({
     setTimelineItems([]);
     setStatus(null);
     setCommands([]);
-    setExpandedToolIds(new Set());
+    setModels([]);
+    setThinkingLevels([]);
+    setWorkspaceContext(null);
+    setPendingCommandSelect(null);
+    setExpandedToolId(null);
 
     const hydrate = async () => {
       try {
-        const [messages, nextStatus, nextCommands] = await Promise.all([
+        const [messages, nextStatus, nextCommands, nextModels, nextThinkingLevels, nextWorkspaceContext] = await Promise.all([
           getPiWebMessages(selectedSession),
           selectedSession.archived ? Promise.resolve(null) : getPiWebStatus(selectedSession),
           selectedSession.archived ? Promise.resolve([]) : listPiWebCommands(selectedSession),
+          selectedSession.archived ? Promise.resolve([]) : listPiWebModels(selectedSession),
+          selectedSession.archived ? Promise.resolve([]) : listPiWebThinkingLevels(selectedSession),
+          resolvePiWebWorkspace(selectedSession.cwd).catch(() => null),
         ]);
         if (cancelled) return;
         setTimelineItems(messagesToTimeline(messages.messages));
         setStatus(nextStatus);
         setCommands(nextCommands);
+        setModels(nextModels);
+        setThinkingLevels(nextThinkingLevels);
+        setWorkspaceContext(nextWorkspaceContext);
         if (!selectedSession.archived) {
           socketRef.current = createPiWebSessionSocket(selectedSession, event => {
             setTimelineItems(items => applyPiWebEvent(items, event));
             if (event.type === 'status.update') setStatus(event.status);
+            if (
+              event.type === 'agent.start'
+              || event.type === 'assistant.delta'
+              || event.type === 'assistant.thinking.delta'
+              || event.type === 'tool.start'
+              || event.type === 'shell.start'
+              || event.type === 'message.append'
+            ) {
+              setIsAwaitingAgent(false);
+            }
+            if (event.type === 'agent.end' || event.type === 'message.end' || event.type === 'session.error') {
+              setIsAwaitingAgent(false);
+              if (event.type === 'message.end') void refreshSessionSnapshot(selectedSession).catch(() => undefined);
+            }
             if (event.type === 'session.name') {
               setSessions(current => current.map(session => session.id === event.sessionId ? { ...session, name: event.name } : session));
             }
@@ -233,7 +358,7 @@ export function PiWebNativeChatView({
       socketRef.current?.close();
       socketRef.current = null;
     };
-  }, [selectedSession]);
+  }, [refreshSessionSnapshot, selectedSession]);
 
   useEffect(() => {
     scrollToBottom(paneRef.current);
@@ -263,22 +388,47 @@ export function PiWebNativeChatView({
     }
   }, [cwd]);
 
+  const pushActivity = useCallback((label: string, detail?: string, tone: TimelineActivity['tone'] = 'neutral') => {
+    setTimelineItems(items => [...items, {
+      kind: 'activity',
+      id: `ui-${crypto.randomUUID()}`,
+      label,
+      detail,
+      tone,
+      createdAt: new Date().toISOString(),
+    }]);
+  }, []);
+
+  const applyCommandResultToTimeline = useCallback((result: PiWebCommandResult) => {
+    if (result.type === 'select') {
+      setPendingCommandSelect(result);
+      pushActivity(result.title, `${result.options.length} options available`);
+      return;
+    }
+    if (result.message) pushActivity(result.message);
+    if ('promptDraft' in result && result.promptDraft) setComposerText(result.promptDraft);
+  }, [pushActivity]);
+
   const submit = useCallback(async () => {
     const text = composerText.trim();
-    if (!text || !selectedSession || selectedSession.archived || isSubmitting) return;
+    if ((!text && !attachments.length) || !selectedSession || selectedSession.archived || isSubmitting) return;
+    const submittedAttachments = attachments;
+    const visibleText = text || attachmentOnlyPrompt(submittedAttachments);
     setComposerText('');
+    setAttachments([]);
     setCommandPanelOpen(false);
     setErrorText('');
     setIsSubmitting(true);
-    setTimelineItems(items => [...items, userTimelineMessage(text)]);
+    setTimelineItems(items => [...items, userTimelineMessage(withAttachmentSummary(visibleText, submittedAttachments))]);
     try {
-      const prompt = withAgSwarmRuntimeContext(text, {
+      const promptText = withAttachmentPrompt(visibleText, submittedAttachments);
+      const prompt = withAgSwarmRuntimeContext(promptText, {
         devices,
         deviceStatusMessage,
         localNodeId,
         localDeviceLabel: displayDeviceLabel,
       });
-      const skillPrompt = agswarmSkillCommandPrompt(text);
+      const skillPrompt = agswarmSkillCommandPrompt(visibleText);
       if (skillPrompt) {
         await sendPiWebPrompt(selectedSession, withAgSwarmRuntimeContext(skillPrompt, {
           devices,
@@ -286,11 +436,13 @@ export function PiWebNativeChatView({
           localNodeId,
           localDeviceLabel: displayDeviceLabel,
         }));
-      } else if (text.startsWith('/')) {
-        const result = await runPiWebCommand(selectedSession, text);
-        setTimelineItems(items => applyCommandResult(items, result));
+        setIsAwaitingAgent(true);
+      } else if (visibleText.startsWith('/')) {
+        const result = await runPiWebCommand(selectedSession, visibleText);
+        applyCommandResultToTimeline(result);
       } else {
         await sendPiWebPrompt(selectedSession, prompt);
+        setIsAwaitingAgent(true);
       }
       setSessions(current => promoteSession(current, selectedSession.id));
     } catch (error) {
@@ -301,9 +453,36 @@ export function PiWebNativeChatView({
       setIsSubmitting(false);
       window.setTimeout(() => composerRef.current?.focus(), 80);
     }
-  }, [composerText, deviceStatusMessage, devices, displayDeviceLabel, isSubmitting, localNodeId, selectedSession]);
+  }, [applyCommandResultToTimeline, attachments, composerText, deviceStatusMessage, devices, displayDeviceLabel, isSubmitting, localNodeId, selectedSession]);
 
-  const isRunning = Boolean(status?.isStreaming || status?.isCompacting || status?.isBashRunning || isSubmitting);
+  const isRunning = Boolean(status?.isStreaming || status?.isCompacting || status?.isBashRunning || isSubmitting || isAwaitingAgent);
+  const canStop = Boolean(selectedSession && !selectedSession.archived && (
+    status?.isStreaming
+    || status?.isCompacting
+    || status?.isBashRunning
+    || (status?.pendingMessageCount || 0) > 0
+    || isSubmitting
+    || isAwaitingAgent
+  ));
+
+  const stopActiveWork = useCallback(async () => {
+    if (!selectedSession || selectedSession.archived) return;
+    setErrorText('');
+    try {
+      await abortPiWebSession(selectedSession);
+      setTimelineItems(items => closeRunningReasoning(markRunningToolsStopped(items)));
+      const nextStatus = await getPiWebStatus(selectedSession).catch(() => null);
+      setStatus(nextStatus);
+      setIsSubmitting(false);
+      setIsAwaitingAgent(false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setErrorText(message);
+      setTimelineItems(items => [...items, errorActivity(message)]);
+    } finally {
+      window.setTimeout(() => composerRef.current?.focus(), 80);
+    }
+  }, [selectedSession]);
 
   return (
     <Box className={`pi-gui-chat-shell ${sessionsOpen ? 'is-sessions-open' : 'is-sessions-collapsed'}`}>
@@ -337,7 +516,30 @@ export function PiWebNativeChatView({
         </div>
       </aside>
 
-      <section className="pi-gui-main">
+      <section
+        className="pi-gui-main"
+        onDragOver={(event) => {
+          if (!event.dataTransfer.types.includes('Files')) return;
+          event.preventDefault();
+          setIsDraggingFiles(true);
+        }}
+        onDragLeave={(event) => {
+          if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+          setIsDraggingFiles(false);
+        }}
+        onDrop={(event) => {
+          if (!event.dataTransfer.files.length) return;
+          event.preventDefault();
+          setIsDraggingFiles(false);
+          void attachFiles(Array.from(event.dataTransfer.files));
+        }}
+      >
+        {isDraggingFiles ? (
+          <div className="pi-gui-drop-overlay">
+            <FileUp size={22} />
+            <span>Drop files to attach</span>
+          </div>
+        ) : null}
         <header className="pi-gui-header">
           <div className="pi-gui-header-title-row">
             <Tooltip label={sessionsOpen ? 'Hide sessions' : 'Show sessions'}>
@@ -361,8 +563,19 @@ export function PiWebNativeChatView({
           </div>
           <Group gap="xs" wrap="nowrap" className="pi-gui-header-actions">
             <Badge color={isRunning ? 'teal' : 'gray'} variant="light">
-              {status?.isStreaming ? 'streaming' : status?.isBashRunning ? 'tool running' : isRunning ? 'running' : 'ready'}
+              {status?.isStreaming ? 'streaming' : status?.isBashRunning ? 'tool running' : isAwaitingAgent ? 'starting' : isRunning ? 'running' : 'ready'}
             </Badge>
+            <Tooltip label={toolsPanelOpen ? 'Hide Pi Web tools' : 'Show Pi Web tools'}>
+              <ActionIcon
+                variant={toolsPanelOpen ? 'light' : 'subtle'}
+                color={toolsPanelOpen ? 'teal' : 'gray'}
+                radius="xl"
+                aria-label={toolsPanelOpen ? 'Hide Pi Web tools' : 'Show Pi Web tools'}
+                onClick={() => setToolsPanelOpen(open => !open)}
+              >
+                <PanelTop size={16} />
+              </ActionIcon>
+            </Tooltip>
             <Tooltip label="Refresh conversations">
               <ActionIcon variant="subtle" color="gray" radius="xl" aria-label="Refresh conversations" onClick={() => void loadSessions()}>
                 <RefreshCw size={16} />
@@ -370,6 +583,23 @@ export function PiWebNativeChatView({
             </Tooltip>
           </Group>
         </header>
+
+        {toolsPanelOpen ? (
+          <PiWebCapabilityPanel
+            session={selectedSession}
+            cwd={cwd}
+            status={status}
+            models={models}
+            thinkingLevels={thinkingLevels}
+            workspaceContext={workspaceContext}
+            pendingCommandSelect={pendingCommandSelect}
+            onPendingCommandSelectChange={setPendingCommandSelect}
+            onStatusChange={setStatus}
+            onActivity={pushActivity}
+            onCommandResult={applyCommandResultToTimeline}
+            onError={setErrorText}
+          />
+        ) : null}
 
         <div ref={paneRef} className="pi-gui-timeline-pane">
           <div className="pi-gui-timeline">
@@ -379,10 +609,10 @@ export function PiWebNativeChatView({
               <TimelineRow
                 key={row.kind === 'single' ? row.item.id : row.id}
                 row={row}
-                expandedToolIds={expandedToolIds}
+                expandedToolId={expandedToolId}
                 assistant={assistantIdentity}
                 user={userIdentity}
-                onToggleTool={(callId) => setExpandedToolIds(current => toggleSetItem(current, callId))}
+                onToggleTool={(callId) => setExpandedToolId(current => current === callId ? null : callId)}
               />
             )) : (
               <div className="pi-gui-empty">Ask {assistantLabel} to start working in this workspace.</div>
@@ -413,8 +643,38 @@ export function PiWebNativeChatView({
               ))}
             </div>
           ) : null}
+          {attachments.length ? (
+            <div className="pi-gui-attachments" aria-label="Attached files">
+              {attachments.map(attachment => (
+                <div key={attachment.id} className="pi-gui-attachment-chip">
+                  <FileUp size={14} />
+                  <span>{attachment.name}</span>
+                  <small>{formatBytes(attachment.sizeBytes)}</small>
+                  <button
+                    type="button"
+                    aria-label={`Remove ${attachment.name}`}
+                    onClick={() => setAttachments(current => current.filter(item => item.id !== attachment.id))}
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
           <div className="pi-gui-composer">
-            <ActionIcon variant="subtle" color="gray" radius="xl" aria-label="New session" onClick={() => void createSession()}>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="pi-gui-file-input"
+              tabIndex={-1}
+              onChange={(event) => {
+                const files = Array.from(event.currentTarget.files || []);
+                event.currentTarget.value = '';
+                void attachFiles(files);
+              }}
+            />
+            <ActionIcon variant="subtle" color="gray" radius="xl" aria-label="Attach files" onClick={() => void chooseAttachments()}>
               <Plus size={18} />
             </ActionIcon>
             <textarea
@@ -437,13 +697,16 @@ export function PiWebNativeChatView({
             />
             <ActionIcon
               variant="filled"
-              color="teal"
+              color={canStop ? 'gray' : 'teal'}
               radius="xl"
-              aria-label="Send"
-              disabled={!composerText.trim() || !selectedSession || isSubmitting}
-              onClick={() => void submit()}
+              aria-label={canStop ? 'Stop' : 'Send'}
+              disabled={!canStop && ((!composerText.trim() && !attachments.length) || !selectedSession)}
+              onClick={() => {
+                if (canStop) void stopActiveWork();
+                else void submit();
+              }}
             >
-              <SendHorizontal size={18} />
+              {canStop ? <Square size={15} fill="currentColor" /> : <SendHorizontal size={18} />}
             </ActionIcon>
           </div>
         </div>
@@ -495,13 +758,13 @@ function TimelineRow({
   row,
   assistant,
   user,
-  expandedToolIds,
+  expandedToolId,
   onToggleTool,
 }: {
   row: TimelineRenderRow;
   assistant: SpeakerIdentity;
   user: SpeakerIdentity;
-  expandedToolIds: Set<string>;
+  expandedToolId: string | null;
   onToggleTool: (callId: string) => void;
 }) {
   if (row.kind === 'assistantGroup') {
@@ -510,7 +773,7 @@ function TimelineRow({
         message={row.message}
         speaker={assistant}
         statusItems={row.statuses}
-        expandedToolIds={expandedToolIds}
+        expandedToolId={expandedToolId}
         onToggleTool={onToggleTool}
       />
     );
@@ -522,25 +785,25 @@ function TimelineRow({
       <MessageRow
         message={item}
         speaker={speaker}
-        expandedToolIds={expandedToolIds}
+        expandedToolId={expandedToolId}
         onToggleTool={onToggleTool}
       />
     );
   }
-  return <StatusItem item={item} expandedToolIds={expandedToolIds} onToggleTool={onToggleTool} loose />;
+  return <StatusItem item={item} expandedToolId={expandedToolId} onToggleTool={onToggleTool} loose />;
 }
 
 function MessageRow({
   message,
   speaker,
   statusItems = [],
-  expandedToolIds,
+  expandedToolId,
   onToggleTool,
 }: {
   message: TimelineMessage;
   speaker: SpeakerIdentity;
   statusItems?: TimelineItem[];
-  expandedToolIds: Set<string>;
+  expandedToolId: string | null;
   onToggleTool: (callId: string) => void;
 }) {
   return (
@@ -556,7 +819,7 @@ function MessageRow({
               <StatusItem
                 key={statusItem.id}
                 item={statusItem}
-                expandedToolIds={expandedToolIds}
+                expandedToolId={expandedToolId}
                 onToggleTool={onToggleTool}
               />
             ))}
@@ -577,12 +840,12 @@ function MessageRow({
 
 function StatusItem({
   item,
-  expandedToolIds,
+  expandedToolId,
   onToggleTool,
   loose = false,
 }: {
   item: TimelineItem;
-  expandedToolIds: Set<string>;
+  expandedToolId: string | null;
   onToggleTool: (callId: string) => void;
   loose?: boolean;
 }) {
@@ -602,7 +865,7 @@ function StatusItem({
   }
   if (item.kind === 'tool') {
     const hasDetail = item.input !== undefined || item.output !== undefined;
-    const expanded = expandedToolIds.has(item.callId);
+    const expanded = expandedToolId === item.callId;
     return (
       <article className={`${loose ? 'pi-gui-status-loose ' : ''}pi-gui-tool pi-gui-tool-${item.status}`}>
         <button type="button" className="pi-gui-tool-header" disabled={!hasDetail} aria-expanded={expanded} onClick={() => onToggleTool(item.callId)}>
@@ -615,7 +878,7 @@ function StatusItem({
     );
   }
   if (item.kind === 'toolGroup') {
-    const expanded = expandedToolIds.has(item.callId);
+    const expanded = expandedToolId === item.callId || item.tools.some(tool => expandedToolId === nestedToolDetailId(tool.callId));
     return (
       <article className={`${loose ? 'pi-gui-status-loose ' : ''}pi-gui-tool pi-gui-tool-success`}>
         <button type="button" className="pi-gui-tool-header" aria-expanded={expanded} onClick={() => onToggleTool(item.callId)}>
@@ -625,8 +888,14 @@ function StatusItem({
         </button>
         {expanded ? (
           <div className="pi-gui-tool-group-detail">
-            {item.tools.map(tool => (
-              <pre key={tool.callId} className="pi-gui-tool-detail">{tool.label}{'\n\n'}{formatToolDetail(tool.input, tool.output)}</pre>
+            {item.tools.map((tool, index) => (
+              <ToolGroupDetailRow
+                key={tool.callId}
+                tool={tool}
+                index={index}
+                expandedToolId={expandedToolId}
+                onToggleTool={onToggleTool}
+              />
             ))}
           </div>
         ) : null}
@@ -637,6 +906,38 @@ function StatusItem({
     <div className={`${loose ? 'pi-gui-status-loose ' : ''}pi-gui-activity ${item.tone === 'error' ? 'is-error' : ''}`}>
       <span>{item.label}</span>
       {item.detail ? <small>{item.detail}</small> : null}
+    </div>
+  );
+}
+
+function ToolGroupDetailRow({
+  tool,
+  index,
+  expandedToolId,
+  onToggleTool,
+}: {
+  tool: TimelineTool;
+  index: number;
+  expandedToolId: string | null;
+  onToggleTool: (callId: string) => void;
+}) {
+  const hasDetail = tool.input !== undefined || tool.output !== undefined;
+  const detailId = nestedToolDetailId(tool.callId);
+  const expanded = expandedToolId === detailId;
+  return (
+    <div className={`pi-gui-tool-group-row pi-gui-tool-${tool.status}`}>
+      <button
+        type="button"
+        className="pi-gui-tool-header"
+        disabled={!hasDetail}
+        aria-expanded={expanded}
+        onClick={() => onToggleTool(detailId)}
+      >
+        {hasDetail ? <ChevronRight className={expanded ? 'is-expanded' : ''} size={15} /> : <Wrench size={14} />}
+        <span>{index + 1}. {tool.label}</span>
+        <small>{tool.toolName} · {toolStatusLabel(tool.status)}</small>
+      </button>
+      {expanded && hasDetail ? <pre className="pi-gui-tool-detail">{formatToolDetail(tool.input, tool.output)}</pre> : null}
     </div>
   );
 }
@@ -666,14 +967,53 @@ function buildTimelineRows(items: TimelineItem[]): TimelineRenderRow[] {
     }
   }
   if (pendingStatuses.length) {
-    rows.push(...pendingStatuses.map(status => ({ kind: 'single' as const, item: status })));
+    const lastAssistantIndex = findLastAssistantRowIndex(rows);
+    if (lastAssistantIndex >= 0) {
+      const row = rows[lastAssistantIndex];
+      const message = assistantMessageFromRow(row);
+      if (!message) {
+        rows.push(...pendingStatuses.map(status => ({ kind: 'single' as const, item: status })));
+        return rows;
+      }
+      const existingStatuses = row.kind === 'assistantGroup' ? row.statuses : [];
+      rows[lastAssistantIndex] = {
+        kind: 'assistantGroup',
+        id: `${message.id}-with-status`,
+        statuses: mergeStatusItems(existingStatuses, pendingStatuses),
+        message,
+      };
+    } else {
+      rows.push(...pendingStatuses.map(status => ({ kind: 'single' as const, item: status })));
+    }
   }
   return rows;
 }
 
+function assistantMessageFromRow(row: TimelineRenderRow): TimelineMessage | null {
+  if (row.kind === 'assistantGroup') return row.message;
+  return row.item.kind === 'message' && row.item.role === 'assistant' ? row.item : null;
+}
+
+function findLastAssistantRowIndex(rows: TimelineRenderRow[]): number {
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index];
+    if (row.kind === 'assistantGroup') return index;
+    if (row.item.kind === 'message' && row.item.role === 'assistant') return index;
+  }
+  return -1;
+}
+
+function mergeStatusItems(left: TimelineItem[], right: TimelineItem[]): TimelineItem[] {
+  const byId = new Map<string, TimelineItem>();
+  for (const item of [...left, ...right]) byId.set(item.id, item);
+  return Array.from(byId.values());
+}
+
 function applyPiWebEvent(items: TimelineItem[], event: PiWebSessionEvent): TimelineItem[] {
   const now = new Date().toISOString();
-  if (event.type === 'message.append') return compactTimelineItems(mergeAppendedMessage(items, messagesToTimeline([event.message])));
+  if (event.type === 'agent.start') return compactTimelineItems(closeOpenStream(items));
+  if (event.type === 'agent.end') return closeRunningReasoning(items);
+  if (event.type === 'message.append') return compactTimelineItems(mergeAppendedMessage(items, messagesToTimeline([event.message], items.length)));
   if (event.type === 'assistant.delta') {
     const lastAssistant = [...items].reverse().find(item => item.kind === 'message' && item.role === 'assistant' && item.id.startsWith('assistant-stream-')) as TimelineMessage | undefined;
     const item: TimelineMessage = lastAssistant
@@ -750,13 +1090,74 @@ function applyPiWebEvent(items: TimelineItem[], event: PiWebSessionEvent): Timel
   }
   if (event.type === 'message.end') {
     if (event.message === undefined) return closeRunningReasoning(items);
-    return compactTimelineItems(mergeFinalAssistantMessage(closeRunningReasoning(items), messagesToTimeline([event.message])));
+    const closedItems = closeRunningReasoning(items);
+    return compactTimelineItems(mergeFinalAssistantMessage(closedItems, messagesToTimeline([event.message], closedItems.length)));
   }
   return items;
 }
 
 function slashCommandName(value: string): string {
   return value.startsWith('/') ? value.slice(1) : value;
+}
+
+function mergeAttachments(current: PendingAttachment[], incoming: PendingAttachment[]): PendingAttachment[] {
+  const seen = new Set(current.map(item => item.stagedPath));
+  return [
+    ...current,
+    ...incoming.filter(item => {
+      if (seen.has(item.stagedPath)) return false;
+      seen.add(item.stagedPath);
+      return true;
+    }),
+  ];
+}
+
+function attachmentOnlyPrompt(attachments: PendingAttachment[]): string {
+  return attachments.length === 1 ? `请查看附件 ${attachments[0].name}` : `请查看这 ${attachments.length} 个附件`;
+}
+
+function withAttachmentSummary(text: string, attachments: PendingAttachment[]): string {
+  if (!attachments.length) return text;
+  return [
+    text,
+    '',
+    attachments.map(attachment => `附件：${attachment.name} (${attachment.relativePath})`).join('\n'),
+  ].join('\n').trim();
+}
+
+function withAttachmentPrompt(text: string, attachments: PendingAttachment[]): string {
+  if (!attachments.length) return text;
+  return [
+    '<agswarm_attachments trusted="true">',
+    'The user attached these files through the AgSwarm desktop app. Paths are relative to the current workspace unless absolutePath is explicitly shown. Use file-reading tools if you need content; do not ask the user to paste the file again.',
+    JSON.stringify(attachments.map(attachment => ({
+      name: attachment.name,
+      path: attachment.relativePath,
+      stagedPath: attachment.relativePath,
+      originalPath: attachment.sourcePath,
+      sizeBytes: attachment.sizeBytes,
+      copiedIntoWorkspace: attachment.copied,
+    })), null, 2),
+    '</agswarm_attachments>',
+    '',
+    text,
+  ].join('\n');
+}
+
+function formatBytes(value: number): string {
+  if (!value) return '';
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${Math.round(value / 102.4) / 10} KB`;
+  return `${Math.round(value / 1024 / 102.4) / 10} MB`;
+}
+
+function truncateText(value: string, maxLength: number): string {
+  const text = value.trim();
+  return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1)}…`;
+}
+
+function isAbsoluteWorkspacePath(value: string): boolean {
+  return value.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith('\\\\');
 }
 
 function withAgSwarmRuntimeContext(
@@ -802,11 +1203,54 @@ function withAgSwarmRuntimeContext(
 }
 
 function Markdown({ text }: { text: string }) {
-  return <div className="pi-gui-markdown" dangerouslySetInnerHTML={{ __html: renderPiMarkdown(text) }} />;
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    enhancePiWebCodeBlocks(root);
+  }, [text]);
+  return <div ref={rootRef} className="pi-gui-markdown" dangerouslySetInnerHTML={{ __html: renderPiMarkdown(text) }} />;
 }
 
-function messagesToTimeline(messages: unknown[]): TimelineItem[] {
-  return messages.flatMap((message, index) => messageToTimeline(message, index));
+function enhancePiWebCodeBlocks(root: HTMLElement): void {
+  root.querySelectorAll('pre').forEach(pre => {
+    if (!(pre instanceof HTMLPreElement) || pre.parentElement?.classList.contains('pi-gui-code-block-wrapper')) return;
+    const code = pre.querySelector('code');
+    if (!(code instanceof HTMLElement)) return;
+    const wrapper = document.createElement('div');
+    wrapper.className = 'pi-gui-code-block-wrapper';
+    const copyButton = document.createElement('button');
+    copyButton.type = 'button';
+    copyButton.className = 'pi-gui-code-copy-button';
+    copyButton.title = 'Copy code block';
+    copyButton.setAttribute('aria-label', 'Copy code block');
+    copyButton.textContent = '⧉';
+    copyButton.addEventListener('click', () => {
+      void copyCodeBlock(code.textContent || '', copyButton);
+    });
+    pre.before(wrapper);
+    wrapper.append(pre, copyButton);
+  });
+}
+
+async function copyCodeBlock(text: string, button: HTMLButtonElement): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+    button.dataset.state = 'copied';
+    button.textContent = '✓';
+  } catch {
+    button.dataset.state = 'failed';
+    button.textContent = '!';
+  } finally {
+    window.setTimeout(() => {
+      button.dataset.state = 'idle';
+      button.textContent = '⧉';
+    }, 1200);
+  }
+}
+
+function messagesToTimeline(messages: unknown[], startIndex = 0): TimelineItem[] {
+  return messages.flatMap((message, index) => messageToTimeline(message, startIndex + index));
 }
 
 function messageToTimeline(message: unknown, index: number): TimelineItem[] {
@@ -816,17 +1260,19 @@ function messageToTimeline(message: unknown, index: number): TimelineItem[] {
   if (role === 'assistant' || role === 'user') {
     const createdAt = new Date(index).toISOString();
     const parts = messageContentParts(record);
-    const text = stripAgSwarmRuntimeContext(parts.text.join('\n')).trim();
+    const errorText = role === 'assistant' ? assistantErrorText(record) : '';
+    const text = stripAgSwarmRuntimeContext(parts.text.join('\n')).trim() || errorText;
     const reasoning = parts.thinking.join('\n').trim();
+    const baseId = String(record.id || `${role}-${index}`);
     const timeline: Array<TimelineMessage | TimelineReasoning | TimelineTool | null> = [
-      reasoning ? { kind: 'reasoning', id: String(record.id || `${role}-${index}-reasoning`), text: reasoning, status: 'complete', createdAt } as TimelineReasoning : null,
+      reasoning ? { kind: 'reasoning', id: `${baseId}-reasoning`, text: reasoning, status: 'complete', createdAt } as TimelineReasoning : null,
       ...parts.tools.map((tool, toolIndex) => ({
         ...tool,
         id: tool.id || `tool-${index}-${toolIndex}`,
         callId: tool.callId || `${index}-${toolIndex}`,
         createdAt,
       })),
-      text ? { kind: 'message', id: String(record.id || `${role}-${index}`), role, text, createdAt } as TimelineMessage : null,
+      text ? { kind: 'message', id: `${baseId}-message`, role, text, createdAt } as TimelineMessage : null,
     ];
     return timeline.filter((item): item is TimelineMessage | TimelineReasoning | TimelineTool => item !== null);
   }
@@ -846,18 +1292,18 @@ function messageToTimeline(message: unknown, index: number): TimelineItem[] {
   return text ? [{ kind: 'activity', id: `message-${index}`, label: text, createdAt: new Date(index).toISOString() }] : [];
 }
 
+function assistantErrorText(record: Record<string, unknown>): string {
+  const stopReason = typeof record.stopReason === 'string' ? record.stopReason : '';
+  const message = typeof record.errorMessage === 'string' ? record.errorMessage : '';
+  if (!message || stopReason !== 'error') return '';
+  return friendlyAgSwarmError(message);
+}
+
 function stripAgSwarmRuntimeContext(value: string): string {
   return value.replace(/<agswarm_app_state\b[^>]*>[\s\S]*?<\/agswarm_app_state>/gi, '').trim();
 }
 
 function compactTimelineItems(items: TimelineItem[]): TimelineItem[] {
-  const withoutDuplicateAdjacentMessages = items.filter((item, index, list) => {
-    if (item.kind !== 'message') return true;
-    const previous = list[index - 1];
-    return !(previous?.kind === 'message'
-      && previous.role === item.role
-      && normalizeComparableText(previous.text) === normalizeComparableText(item.text));
-  });
   const result: TimelineItem[] = [];
   let pendingTools: TimelineTool[] = [];
 
@@ -871,7 +1317,7 @@ function compactTimelineItems(items: TimelineItem[]): TimelineItem[] {
     pendingTools = [];
   };
 
-  for (const item of withoutDuplicateAdjacentMessages) {
+  for (const item of items) {
     if (item.kind === 'tool') {
       pendingTools.push(item);
       if (item.status === 'running') flushTools();
@@ -1055,14 +1501,6 @@ function stableHash(value: string): number {
   return Math.abs(hash);
 }
 
-function applyCommandResult(items: TimelineItem[], result: unknown): TimelineItem[] {
-  if (!result || typeof result !== 'object') return items;
-  const record = result as Record<string, unknown>;
-  const message = typeof record.message === 'string' ? record.message : '';
-  if (!message) return items;
-  return [...items, { kind: 'activity', id: `command-${crypto.randomUUID()}`, label: message, createdAt: new Date().toISOString() }];
-}
-
 function upsertTimeline(items: TimelineItem[], item: TimelineItem): TimelineItem[] {
   const index = items.findIndex(existing => existing.id === item.id);
   if (index === -1) return [...items, item];
@@ -1075,6 +1513,21 @@ function mergeTimelineItems(left: TimelineItem[], right: TimelineItem[]): Timeli
   return right.reduce(upsertTimeline, left);
 }
 
+function mergeSnapshotTimeline(left: TimelineItem[], snapshot: TimelineItem[]): TimelineItem[] {
+  if (!snapshot.length) return left;
+  const snapshotMessageKeys = new Set(
+    snapshot
+      .filter((item): item is TimelineMessage => item.kind === 'message')
+      .map(message => messageIdentityKey(message)),
+  );
+  const withoutOptimisticMessages = left.filter(item => (
+    item.kind !== 'message'
+    || !item.id.startsWith(`${item.role}-`)
+    || !snapshotMessageKeys.has(messageIdentityKey(item))
+  ));
+  return compactTimelineItems(mergeTimelineItems(withoutOptimisticMessages, snapshot));
+}
+
 function mergeAppendedMessage(left: TimelineItem[], right: TimelineItem[]): TimelineItem[] {
   const userMessage = right.find(item => item.kind === 'message' && item.role === 'user') as TimelineMessage | undefined;
   const assistantMessage = right.find(item => item.kind === 'message' && item.role === 'assistant') as TimelineMessage | undefined;
@@ -1085,6 +1538,10 @@ function mergeAppendedMessage(left: TimelineItem[], right: TimelineItem[]): Time
   return mergeTimelineItems(withoutOptimisticDuplicate, right);
 }
 
+function messageIdentityKey(message: TimelineMessage): string {
+  return `${message.role}:${normalizeComparableText(message.text)}`;
+}
+
 function mergeFinalAssistantMessage(left: TimelineItem[], right: TimelineItem[]): TimelineItem[] {
   const hasAssistantMessage = right.some(item => item.kind === 'message' && item.role === 'assistant');
   const base = hasAssistantMessage
@@ -1093,39 +1550,32 @@ function mergeFinalAssistantMessage(left: TimelineItem[], right: TimelineItem[])
   return mergeTimelineItems(base, right);
 }
 
+function closeOpenStream(items: TimelineItem[]): TimelineItem[] {
+  return closeRunningReasoning(items).map(item => {
+    if (item.kind === 'message' && item.role === 'assistant' && item.id.startsWith('assistant-stream-')) {
+      return { ...item, id: item.id.replace('assistant-stream-', 'assistant-stream-closed-') };
+    }
+    return item;
+  });
+}
+
 function closeRunningReasoning(items: TimelineItem[]): TimelineItem[] {
   return items.map(item => item.kind === 'reasoning' && item.status === 'running' ? { ...item, status: 'complete' } : item);
 }
 
-function collapseCompletedTools(items: TimelineItem[]): TimelineItem[] {
-  const result: TimelineItem[] = [];
-  const pendingTools: TimelineTool[] = [];
-  const flush = () => {
-    if (!pendingTools.length) return;
-    if (pendingTools.length === 1) {
-      result.push(pendingTools[0]);
-    } else {
-      result.push({
-        kind: 'toolGroup',
-        id: `tools-${pendingTools.map(tool => tool.callId).join('-')}`,
-        callId: `tools-${pendingTools.map(tool => tool.callId).join('-')}`,
-        label: `已调用 ${pendingTools.length} 个工具`,
-        tools: [...pendingTools],
-        createdAt: pendingTools[0].createdAt,
-      });
+function markRunningToolsStopped(items: TimelineItem[]): TimelineItem[] {
+  return items.map(item => {
+    if (item.kind === 'tool' && item.status === 'running') {
+      return { ...item, status: 'error', label: `${item.label} stopped` };
     }
-    pendingTools.length = 0;
-  };
-  for (const item of items) {
-    if (item.kind === 'tool' && item.status === 'success') {
-      pendingTools.push(item);
-      continue;
+    if (item.kind === 'toolGroup') {
+      return {
+        ...item,
+        tools: item.tools.map(tool => tool.status === 'running' ? { ...tool, status: 'error', label: `${tool.label} stopped` } : tool),
+      };
     }
-    flush();
-    result.push(item);
-  }
-  flush();
-  return result;
+    return item;
+  });
 }
 
 function summarizeToolGroup(tools: TimelineTool[]): string {
@@ -1183,11 +1633,8 @@ function shortPath(path: string): string {
   return parts.length > 2 ? parts.slice(-2).join('/') : path;
 }
 
-function toggleSetItem(current: Set<string>, value: string): Set<string> {
-  const next = new Set(current);
-  if (next.has(value)) next.delete(value);
-  else next.add(value);
-  return next;
+function nestedToolDetailId(callId: string): string {
+  return `detail-${callId}`;
 }
 
 function scrollToBottom(element: HTMLElement | null) {

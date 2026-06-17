@@ -1,18 +1,28 @@
 import { marked } from 'marked';
-import { normalizeMarkdownContent } from './markdownNormalize';
 
 const markdownRenderer = new marked.Renderer();
+const MAX_CACHE_SIZE = 300;
+const markdownCache = new Map<string, string>();
 
-markdownRenderer.html = (html) => escapeHtml(html);
+markdownRenderer.html = (html) => escapeHtml(String(html));
 
 export function renderPiMarkdown(value: string): string {
-  const rendered = marked.parse(normalizeMarkdownContent(value), {
+  const cached = markdownCache.get(value);
+  if (cached !== undefined) return cached;
+
+  const rendered = marked.parse(value, {
     async: false,
     breaks: true,
     gfm: true,
     renderer: markdownRenderer,
   });
-  return sanitizeMarkdownHtml(typeof rendered === 'string' ? rendered : '');
+  const html = sanitizeMarkdownHtml(typeof rendered === 'string' ? rendered : '');
+  markdownCache.set(value, html);
+  if (markdownCache.size > MAX_CACHE_SIZE) {
+    const oldestKey = markdownCache.keys().next().value;
+    if (oldestKey !== undefined) markdownCache.delete(oldestKey);
+  }
+  return html;
 }
 
 function sanitizeMarkdownHtml(html: string): string {

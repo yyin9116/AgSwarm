@@ -108,11 +108,32 @@ export type RuntimeConfig = {
   nodeId?: string;
   deviceLabel?: string;
   natsUrl?: string;
+  repoRoot?: string;
 };
 
 export type FrontendDebugLogRequest = {
   label: string;
   payload: Record<string, unknown>;
+};
+
+export type StageChatAttachmentRequest = {
+  sourcePath: string;
+  workspaceRoot: string;
+};
+
+export type SaveChatAttachmentRequest = {
+  name: string;
+  workspaceRoot: string;
+  bytes: number[];
+};
+
+export type StagedChatAttachment = {
+  name: string;
+  sourcePath: string;
+  stagedPath: string;
+  relativePath: string;
+  sizeBytes: number;
+  copied: boolean;
 };
 
 export type LocalPeerStatus = {

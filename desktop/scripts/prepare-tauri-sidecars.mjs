@@ -155,6 +155,7 @@ async function preparePiWebRuntime(target) {
   await access(path.join(piWebPackageDir, 'dist', 'server', 'index.js'));
   await access(path.join(piWebPackageDir, 'dist', 'server', 'sessiond.js'));
   await access(path.join(piWebPackageDir, 'dist', 'server', 'app.js'));
+  await ensureNodePtyPrebuild(target);
 
   if (!existsSync(path.join(piWebClientDir, 'index.html'))) {
     await cp(path.join(piWebPackageDir, 'dist', 'client'), piWebClientDir, { recursive: true });
@@ -166,6 +167,37 @@ async function preparePiWebRuntime(target) {
 
   await writePreparedTargetMarker(target);
   console.log(`pi-web runtime ready for ${target}: ${runtimeDir}`);
+}
+
+async function ensureNodePtyPrebuild(target) {
+  const prebuild = nodePtyPrebuildName(target);
+  if (!prebuild) return;
+  const runtimeNodePtyDir = path.join(runtimeDir, 'node_modules', 'node-pty');
+  const runtimePrebuildDir = path.join(runtimeNodePtyDir, 'prebuilds', prebuild);
+  const runtimePty = path.join(runtimePrebuildDir, 'pty.node');
+  const runtimeSpawnHelper = path.join(runtimePrebuildDir, 'spawn-helper');
+  if (existsSync(runtimePty) && (target.includes('darwin') ? existsSync(runtimeSpawnHelper) : true)) {
+    if (existsSync(runtimeSpawnHelper)) chmodSync(runtimeSpawnHelper, 0o755);
+    return;
+  }
+
+  const sourcePrebuildDir = path.join(desktopDir, 'node_modules', 'node-pty', 'prebuilds', prebuild);
+  if (!existsSync(sourcePrebuildDir)) {
+    throw new Error(`node-pty prebuild ${prebuild} is missing; run npm install in desktop before preparing sidecars.`);
+  }
+  await cp(sourcePrebuildDir, runtimePrebuildDir, { recursive: true, force: true });
+  if (existsSync(runtimeSpawnHelper)) chmodSync(runtimeSpawnHelper, 0o755);
+  await access(runtimePty);
+  if (target.includes('darwin')) await access(runtimeSpawnHelper);
+  console.log(`node-pty prebuild ready for ${target}: ${runtimePrebuildDir}`);
+}
+
+function nodePtyPrebuildName(target) {
+  if (target === 'aarch64-apple-darwin') return 'darwin-arm64';
+  if (target === 'x86_64-apple-darwin') return 'darwin-x64';
+  if (target === 'x86_64-pc-windows-msvc') return 'win32-x64';
+  if (target === 'x86_64-unknown-linux-gnu') return 'linux-x64';
+  return null;
 }
 
 async function pruneRuntimeDevelopmentFiles(rootDir) {

@@ -1,6 +1,6 @@
 [package]
 name = "agswarm-client"
-version = "0.2.19"
+version = "0.2.20"
 description = "AgSwarm Client desktop shell"
 authors = ["AgSwarm"]
 edition = "2021"

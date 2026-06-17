@@ -83,6 +83,9 @@ interface DevicesViewProps {
   devices: Device[];
   transfers?: FileTransfer[];
   onSelectDevice: (device: Device, file?: File) => void;
+  onDropFilesToDevice?: (device: Device, files: File[]) => void;
+  externalDragOverDeviceId?: string;
+  deliveryAnimation?: { deviceId: string; fileName: string; id: number } | null;
   onCancelTransfer?: (transferId: string) => void;
   onRefreshDevices?: () => void;
   isRefreshing?: boolean;
@@ -97,6 +100,9 @@ export function DevicesView({
   devices,
   transfers = [],
   onSelectDevice,
+  onDropFilesToDevice,
+  externalDragOverDeviceId,
+  deliveryAnimation,
   onCancelTransfer,
   onRefreshDevices,
   isRefreshing = false,
@@ -142,8 +148,14 @@ export function DevicesView({
 
   const handleDrop = (event: DragEvent, device: Device) => {
     event.preventDefault();
+    event.stopPropagation();
     setDragOverDevice(null);
-    const file = event.dataTransfer.files?.[0];
+    const files = Array.from(event.dataTransfer.files || []);
+    if (files.length && onDropFilesToDevice) {
+      onDropFilesToDevice(device, files);
+      return;
+    }
+    const file = files[0];
     if (file) onSelectDevice(device, file);
   };
 
@@ -185,7 +197,8 @@ export function DevicesView({
             key={device.id}
             device={device}
             localNodeId={localNodeId}
-            dragOver={dragOverDevice === device.id}
+            dragOver={dragOverDevice === device.id || externalDragOverDeviceId === device.id}
+            deliveringFileName={deliveryAnimation?.deviceId === device.id ? deliveryAnimation.fileName : undefined}
             editing={editingDeviceId === device.id}
             editingName={editingName}
             onEditingNameChange={setEditingName}
@@ -198,6 +211,7 @@ export function DevicesView({
             onOpenDetails={() => setSelectedDeviceDetails(device)}
             onDragOver={(event) => {
               event.preventDefault();
+              event.stopPropagation();
               setDragOverDevice(device.id);
             }}
             onDragLeave={() => setDragOverDevice(null)}
@@ -241,6 +255,7 @@ const DeviceCard: FC<{
   device: Device;
   localNodeId?: string;
   dragOver: boolean;
+  deliveringFileName?: string;
   editing: boolean;
   editingName: string;
   onEditingNameChange: (value: string) => void;
@@ -256,6 +271,7 @@ const DeviceCard: FC<{
   device,
   localNodeId,
   dragOver,
+  deliveringFileName,
   editing,
   editingName,
   onEditingNameChange,
@@ -270,6 +286,8 @@ const DeviceCard: FC<{
 }) => {
   return (
     <Card
+      data-device-drop-id={device.id}
+      className={dragOver ? 'agswarm-device-card is-drop-target' : 'agswarm-device-card'}
       withBorder
       radius="md"
       p="md"
@@ -285,7 +303,6 @@ const DeviceCard: FC<{
       style={{
         cursor: 'pointer',
         outlineOffset: 3,
-        background: dragOver ? 'rgba(20, 184, 166, 0.12)' : undefined,
       }}
     >
       <Stack gap="md">
@@ -300,8 +317,20 @@ const DeviceCard: FC<{
           </Badge>
         </Group>
 
-        {dragOver && (
-          <Badge color="teal" variant="filled" leftSection={<FileUp size={12} />}>Drop to send file</Badge>
+        {dragOver ? (
+          <div className="agswarm-device-drop-guide">
+            <FileUp size={18} />
+            <span>Release to send here</span>
+          </div>
+        ) : (
+          <Badge color="gray" variant="light" leftSection={<FileUp size={12} />}>Drop files here</Badge>
+        )}
+
+        {deliveringFileName && (
+          <div className="agswarm-device-delivery">
+            <FileUp size={15} />
+            <Text size="xs" fw={700} truncate>Sending {deliveringFileName}</Text>
+          </div>
         )}
 
         {editing ? (
